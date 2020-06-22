@@ -6,7 +6,7 @@
 
 ## How to Run Basics
 
-![Three Stage](images/Three Stage.svg)
+![Three Stage](./images/Three Stage.svg)
 
 ## Configuration, Dependencies and Directory Structure
 
