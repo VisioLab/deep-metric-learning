@@ -6,7 +6,7 @@
 
 ## How to Run Basics
 
-![Three Stage](./images/Three Stage.svg?sanitize=true)
+![network](./images/network.png)
 
 
 
