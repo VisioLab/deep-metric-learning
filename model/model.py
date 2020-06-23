@@ -130,7 +130,7 @@ class ThreeStageNetwork():
 
         # log some of this information
         self.model_params = {"Trunk_Model":self.efficientnet_version,
-                             "Optimizers":[str(self.trunk_optim), str(self.embedder_optim), self.(classifier_optim)],
+                             "Optimizers":[str(self.trunk_optim), str(self.embedder_optim), str(self.classifier_optim)],
                              "Embedder":str(self.embedder),
                              "Weight_Decay":weight_decay,
                              "Scheduler_Decays":[trunk_decay, embedder_decay, classifier_decay],
