@@ -200,7 +200,7 @@ class ThreeStageNetwork():
         print("logits shape", tot_logits.shape)
         print("Accuracy is", np.mean(accuracies))
 
-        del temp_loader, curr_sampler
+        del temp_loader, temp_sampler
 
         return tot_embeds, tot_logits, tot_labels, np.mean(accuracies)
 
