@@ -130,7 +130,8 @@ class ThreeStageNetwork():
 
         # log some of this information
         self.model_params = {"Trunk_Model":self.efficientnet_version,
-                             "Optimizers":[trunk_optim, embedder_optim, classifier_optim],
+                             "Optimizers":[str(self.trunk_optim), str(self.embedder_optim), self.(classifier_optim)],
+                             "Embedder":str(self.embedder),
                              "Weight_Decay":weight_decay,
                              "Scheduler_Decays":[trunk_decay, embedder_decay, classifier_decay],
                              "Embedding_Size":embedding_size,
@@ -387,9 +388,8 @@ class ThreeStageNetwork():
 
             # Train accuracy, embeddings and potential UMAP
             print("Training")
-            #get_embeddings(trunk, embedder, classifier, dataset, indices, batch_size=256)
             em, lo, la, train_accuracy = self.get_embeddings_logits(val_dataset, train_ids)
-            
+
             # Validation accuracy, loss, embeddings and potential UMAP
             print("Validation")
             em, lo, la, val_accuracy = self.get_embeddings_logits(val_dataset, val_ids)
@@ -436,7 +436,8 @@ class ThreeStageNetwork():
                     }, model_save_path + "/models")
 
                 # save the JSON including model details, this can be improved to take the mean
-                model_params["final_val_accuracy"] = best_val_accuracy
-                model_params["Time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                self.model_params["final_val_accuracy"] = best_val_accuracy
+                self.model_params["Time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+                self.model_params = {k:str(self.model_params[k]) for k in self.model_params}
                 with open(log_save_path + "/model_dict.json", "w") as json_file:
-                    json.dump(model_params, json_file)
+                    json.dump(self.model_params, json_file)
