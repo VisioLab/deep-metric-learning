@@ -93,8 +93,9 @@ class ThreeStageNetwork():
                  trunk_decay=0.95,
                  embedder_decay=0.95,
                  classifier_decay=0.95):
+
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.log_train = True
+        
         # build three stage network
         self.num_classes = num_classes
         self.embedding_size = embedding_size
@@ -223,8 +224,10 @@ class ThreeStageNetwork():
               loss_ratios,
               model_save_path="models", 
               log_save_path="logs", 
-              training_data_path="data"):
-        
+              training_data_path="data",
+              log_train=True):
+
+        self.log_train = log_train
         # Get dataloaders
         augmentations = data_augmentation(hflip=True,
                                           crop=False,
