@@ -396,9 +396,9 @@ class ThreeStageNetwork():
 
             # finally we log the batch metrics
             if self.log_train:
-                epoch_history["Learning_Rates"].append([trunk_scheduler.get_last_lr(),
-                                                        embedder_scheduler.get_last_lr(),
-                                                        classifier_scheduler.get_last_lr()])
+                epoch_history["Learning_Rates"].append([self.trunk_scheduler.get_last_lr(),
+                                                        self.embedder_scheduler.get_last_lr(),
+                                                        self.classifier_scheduler.get_last_lr()])
                 epoch_history["Epoch"].append(epoch)
                 epoch_history["Train_Accuracy"].append(train_accuracy)
                 epoch_history["Val_Accuracy"].append(val_accuracy)

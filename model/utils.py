@@ -104,10 +104,11 @@ def zip_files(directory_list=["logs", "models"], experiment_id=0, zip_train_data
             for folderName, _, filenames in os.walk(directory):
                 for filename in filenames:
                     file_path = os.path.join(folderName, filename)
-                    if "hdf5" not in file_path:
-                        print(f"Zipping {file_path}")
-                        # Add file to zip
-                        zipObj.write(file_path, os.path.basename(file_path))
+                    if zip_train_data is False:
+                        if "hdf5" not in file_path:
+                            print(f"Zipping {file_path}")
+                            # Add file to zip
+                            zipObj.write(file_path, os.path.basename(file_path))
 
     return experiment_id
 
