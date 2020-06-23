@@ -75,7 +75,7 @@ def prepare_experiment():
             os.mkdir(directory)
 
 
-def zip_files(directory_list=["logs", "models"], experiment_id=0):
+def zip_files(directory_list=["logs", "models"], experiment_id=0, zip_train_data=False):
     """
     utility to zip files at the end of experiment. Looks for all files in
     directories "logs" and "models" to zip. saves zipped file in local path
@@ -104,9 +104,10 @@ def zip_files(directory_list=["logs", "models"], experiment_id=0):
             for folderName, _, filenames in os.walk(directory):
                 for filename in filenames:
                     file_path = os.path.join(folderName, filename)
-                    print(f"Zipping {file_path}")
-                    # Add file to zip
-                    zipObj.write(file_path, os.path.basename(file_path))
+                    if "hdf5" not in file_path:
+                        print(f"Zipping {file_path}")
+                        # Add file to zip
+                        zipObj.write(file_path, os.path.basename(file_path))
 
     return experiment_id
 
