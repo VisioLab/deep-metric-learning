@@ -17,7 +17,6 @@ Third party libraries:
 import argparse
 import collections
 import numpy as np
-import umap # used to visualize embeddings
 
 # Import pytorch metric learning stuff
 import pytorch_metric_learning
@@ -47,7 +46,6 @@ import h5py
 # logging
 import os
 import subprocess
-from zipfile import ZipFile
 import warnings
 from pynvml import *
 import csv
@@ -322,10 +320,10 @@ class ThreeStageNetwork():
                     # compute loss
                     time_check = time()
                     loss = 0
-                    loss += self.loss_func1(embeddings, labels, hard_pairs) * loss_ratios[0]
-                    loss += self.loss_func2(embeddings, labels, hard_pairs) * loss_ratios[0]
-                    loss += self.loss_func3(embeddings, labels)
-                    loss += self.classifier_loss(logits, labels.cuda().long()) * loss_ratios[1] * 3
+                    loss += self.triplet(embeddings, labels, hard_pairs) * loss_ratios[0]
+                    loss += self.multisimilarity(embeddings, labels, hard_pairs) * loss_ratios[1]
+                    loss += self.proxy_anchor(embeddings, labels) * loss_ratios[2]
+                    loss += self.crossentropy(logits, labels.cuda().long()) * loss_ratios[3]
                     loss.backward()
                     performance_dict["Compute_Loss"] += time() - time_check
 
@@ -334,7 +332,7 @@ class ThreeStageNetwork():
                     self.trunk_optimizer.step()
                     self.embedder_optimizer.step()
                     self.classifier_optimizer.step()
-                    self.func3_optimizer.step()
+                    self.proxy_optimizer.step()
                     performance_dict["Optim_Step"] += time() - time_check
 
                     time_check = time()
@@ -417,6 +415,7 @@ class ThreeStageNetwork():
             self.trunk_scheduler.step()
             self.embedder_scheduler.step()
             self.classifier_scheduler.step()
+            self.proxy_scheduler.step()
 
             # save best model (based on validation accuracy)
             if val_accuracy > best_val_accuracy:
