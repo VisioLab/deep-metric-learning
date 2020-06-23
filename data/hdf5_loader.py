@@ -1,7 +1,8 @@
 import h5py
 import collections
 import numpy as np
-from autoaugment import ImageNetPolicy
+from .autoaugment import ImageNetPolicy
+import torch
 from torchvision import datasets, transforms
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler

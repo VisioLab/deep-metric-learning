@@ -1,3 +1,5 @@
+
+import torch
 import numpy as np
 import umap # used to visualize embeddings
 from PIL import Image

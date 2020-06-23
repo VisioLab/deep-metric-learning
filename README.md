@@ -2,11 +2,11 @@
 
 ## Three Stage Architecture
 
-
+![network](./images/network.png)
 
 ## How to Run Basics
 
-![network](./images/network.png)
+
 
 
 

@@ -55,10 +55,10 @@ from time import time
 from datetime import datetime
 
 # my modules
-from utils import calc_accuracy
-from losses import *
-from hdf5_loader import *
-from autoaugment import ImageNetPolicy
+from .utils import calc_accuracy
+from .losses import *
+from data.hdf5_loader import *
+from data.autoaugment import ImageNetPolicy
 
 
 class Network(nn.Module):
@@ -82,10 +82,10 @@ class ThreeStageNetwork():
     def __init__(self,
                  num_classes=101,
                  embedding_size=512,
-                 efficient_version="efficientnet-b0",
-                 trunk_optim=RMSProp,
-                 embedder_optim=RMSProp,
-                 classifier_optim=RMSProp,
+                 efficientnet_version="efficientnet-b0",
+                 trunk_optim=RMSprop,
+                 embedder_optim=RMSprop,
+                 classifier_optim=RMSprop,
                  trunk_lr=1e-3,
                  embedder_lr=1e-3, 
                  classifier_lr=1e-3,
@@ -93,17 +93,18 @@ class ThreeStageNetwork():
                  trunk_decay=0.95,
                  embedder_decay=0.95,
                  classifier_decay=0.95):
-
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.log_train = True
         # build three stage network
         self.num_classes = num_classes
         self.embedding_size = embedding_size
-        self.efficientnet_version = efficient_version
+        self.efficientnet_version = efficientnet_version
         self.trunk = EfficientNet.from_pretrained(efficientnet_version, num_classes=1024)
         self.model_output_size = self.trunk._fc.in_features
         self.trunk._fc = torch.nn.Identity()
-        self.trunk = nn.DataParallel(self.trunk.to(device))
-        self.embedder = nn.DataParallel(Network([self.model_output_size, self.embedding_size]).to(device))
-        self.classifier = nn.DataParallel(Network([self.embedding_size, self.num_classes]).to(device))
+        self.trunk = nn.DataParallel(self.trunk.to(self.device))
+        self.embedder = nn.DataParallel(Network([self.model_output_size, self.embedding_size]).to(self.device))
+        self.classifier = nn.DataParallel(Network([self.embedding_size, self.num_classes]).to(self.device))
 
         # build optimizers
         self.trunk_optimizer = trunk_optim(self.trunk.parameters(), lr=trunk_lr, weight_decay=weight_decay)
@@ -133,7 +134,7 @@ class ThreeStageNetwork():
                              "Scheduler_Decays":[trunk_decay, embedder_decay, classifier_decay],
                              "Embedding_Size":embedding_size,
                              "Learning_Rates":[trunk_lr, embedder_lr, classifier_lr],
-                             "Miner":str(miner)}
+                             "Miner":str(self.miner)}
 
 
     def load_weights(self, path):
@@ -218,7 +219,7 @@ class ThreeStageNetwork():
 
     def train(self,
               batch_size,
-              epochs,
+              n_epochs,
               loss_ratios,
               model_save_path="models", 
               log_save_path="logs", 
@@ -255,7 +256,7 @@ class ThreeStageNetwork():
         batch_log_path = log_save_path + "/batch_history.csv"
         epoch_log_path = log_save_path + "/epoch_history.csv"
 
-        if log_train is True and os.path.exists(batch_log_path) is False:
+        if self.log_train is True and os.path.exists(batch_log_path) is False:
             with open(batch_log_path, "a+") as f:
                 writer = csv.writer(f)
                 writer.writerow(list(batch_history.keys()))
@@ -294,13 +295,13 @@ class ThreeStageNetwork():
                 start_t = time()
                 for i, data in enumerate(trainloader):
                     inputs, labels = data
-                    inputs, labels = inputs.to(device), labels.to(device)
+                    inputs, labels = inputs.to(self.device), labels.to(self.device)
 
                     # zero the parameter gradients
                     self.trunk_optimizer.zero_grad()
                     self.embedder_optimizer.zero_grad()
                     self.classifier_optimizer.zero_grad()
-                    self.func3_optimizer.zero_grad()
+                    self.proxy_optimizer.zero_grad()
                     self.trunk.zero_grad()
                     self.embedder.zero_grad()
                     self.classifier.zero_grad()
@@ -347,7 +348,7 @@ class ThreeStageNetwork():
 
                     res = nvmlDeviceGetUtilizationRates(handle)
                     # log the current batch information
-                    if log_train:
+                    if self.log_train:
                         batch_history["Iteration"].append(epoch*n_iters+i)
                         batch_history["Loss"].append(batch_loss)
                         batch_history["Accuracy"].append(batch_acc)
@@ -384,14 +385,14 @@ class ThreeStageNetwork():
             # Train accuracy, embeddings and potential UMAP
             print("Training")
             #get_embeddings(trunk, embedder, classifier, dataset, indices, batch_size=256)
-            em, lo, la, train_accuracy = get_embeddings_logits(val_dataset, train_indices)
+            em, lo, la, train_accuracy = self.get_embeddings_logits(val_dataset, train_ids)
             
             # Validation accuracy, loss, embeddings and potential UMAP
             print("Validation")
-            em, lo, la, val_accuracy = get_embeddings_logits(val_dataset, val_indices)
+            em, lo, la, val_accuracy = self.get_embeddings_logits(val_dataset, val_ids)
 
             # finally we log the batch metrics
-            if log_train:
+            if self.log_train:
                 epoch_history["Learning_Rates"].append([trunk_scheduler.get_last_lr(),
                                                         embedder_scheduler.get_last_lr(),
                                                         classifier_scheduler.get_last_lr()])
