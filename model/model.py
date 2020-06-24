@@ -355,6 +355,7 @@ class ThreeStageNetwork():
         # Set up the logging
         batch_history = {"Iteration":[],
                          "Loss":[],
+                         "Losses":[],
                          "Accuracy":[],
                          "GPU_useage":[],
                          "GPU_mem":[],
@@ -434,13 +435,17 @@ class ThreeStageNetwork():
                     time_check = time()
                     loss = 0
                     if loss_ratios[0] != 0:
-                        loss += self.triplet(embeddings, labels, hard_pairs) * loss_ratios[0]
+                        triplet_loss_curr = self.triplet(embeddings, labels, hard_pairs)
+                        loss += triplet_loss_curr * loss_ratios[0]
                     if loss_ratios[1] != 0:
-                        loss += self.multisimilarity(embeddings, labels, hard_pairs) * loss_ratios[1]
+                        ms_loss_curr = self.multisimilarity(embeddings, labels, hard_pairs)
+                        loss += ms_loss_curr * loss_ratios[1]
                     if loss_ratios[2] != 0:
-                        loss += self.proxy_anchor(embeddings, labels) * loss_ratios[2]
+                        proxy_loss_curr = self.proxy_anchor(embeddings, labels)
+                        loss += proxy_loss_curr * loss_ratios[2]
                     if loss_ratios[3] != 0:
-                        loss += self.crossentropy(logits, labels.cuda().long()) * loss_ratios[3]
+                        cse_loss_curr = self.crossentropy(logits, labels.cuda().long())
+                        loss += cse_loss_curr * loss_ratios[3]
                     loss.backward()
                     performance_dict["Compute_Loss"] += time() - time_check
 
@@ -484,7 +489,10 @@ class ThreeStageNetwork():
 
                     # now update our loading bar with new values of batch loss and accuracy
                     t.set_description('Epoch %i' % int(epoch))
-                    t.set_postfix(loss=batch_loss, acc=batch_acc, gpu=res.gpu, gpuram=res.memory)
+                    t.set_postfix(loss=batch_loss, 
+                                  acc=batch_acc, 
+                                  gpu=res.gpu, 
+                                  gpuram=res.memory)
                     t.update()
                     performance_dict["Logging"] += time() - time_check
 
