@@ -63,7 +63,7 @@ from data.autoaugment import ImageNetPolicy
 
 class Network(nn.Module):
 
-    def __init__(self, layer_sizes, neuron_fc=4096):
+    def __init__(self, layer_sizes, neuron_fc=2048):
         super().__init__()
         self.classifier = nn.Sequential(
             nn.Linear(layer_sizes[0], neuron_fc),
@@ -84,9 +84,9 @@ class ThreeStageNetwork():
                  num_classes=101,
                  embedding_size=512,
                  efficientnet_version="efficientnet-b0",
-                 trunk_optim=RMSprop,
-                 embedder_optim=RMSprop,
-                 classifier_optim=RMSprop,
+                 trunk_optim=AdamW,
+                 embedder_optim=AdamW,
+                 classifier_optim=AdamW,
                  trunk_lr=1e-3,
                  embedder_lr=1e-3, 
                  classifier_lr=1e-3,
@@ -94,9 +94,26 @@ class ThreeStageNetwork():
                  trunk_decay=0.95,
                  embedder_decay=0.95,
                  classifier_decay=0.95):
+        """
+        Inputs:
+            num_classes int: Number of Classes (for Classifier purely)
+            embedding_size int: The size of embedding space output from Embedder
+            efficientnet_version str: Which efficientnet model to use for Trunk
+            trunk_optim optim: Which optimizer to use, such as AdamW
+            embedder_optim optim: Which optimizer to use, such as AdamW
+            classifier_optim optim: Which optimizer to use, such as AdamW
+            trunk_lr float: The learning rate for the Trunk Optimizer
+            embedder_lr float: The learning rate for the Embedder Optimizer
+            classifier_lr float: The learning rate for the Classifier Optimizer
+            weight_decay float: The weight decay for all 3 optimizers
+            trunk_decay float: The multiplier for the Scheduler y_{t+1} <- trunk_decay * y_{t}
+            embedder_decay float: The multiplier for the Scheduler y_{t+1} <- embedder_decay * y_{t}
+            classifier_decay float: The multiplier for the Scheduler y_{t+1} <- classifier_decay * y_{t}
+        """
 
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
+        self.pretrained = False # this is used to load the indices for train/val data for now
+
         # build three stage network
         self.num_classes = num_classes
         self.embedding_size = embedding_size
@@ -144,7 +161,8 @@ class ThreeStageNetwork():
 
     def get_embeddings_logits(self, dataset, indices, batch_size=256):
         """
-        This can be used for inference
+        This can be used for inference but is not super appropriate since
+        it requires the dataset/indices
         """
         
         # build a temporary dataloader
@@ -197,7 +215,27 @@ class ThreeStageNetwork():
         return tot_embeds, tot_logits, tot_labels, np.mean(accuracies)
 
 
+    def image_inference(self, image):
+        # image should be an nparray
+
+        self.trunk.eval()
+        self.embedder.eval()
+        self.classifier.eval()
+
+        with torch.no_grad():
+            fc_out = self.trunk(torch.from_numpy(image).cuda())
+            embeds = self.embedder(fc_out)
+            logits = self.classifier(embeds)
+
+        return embeds, logits
+
+
     def save_model(self, path):
+        """
+        This function is used to save the state dictionaries of
+        all three models and their corresponding classifiers to
+        the input path provided under the name "models.h5"
+        """
         
         print("Saving model to", path)
         torch.save({
@@ -211,9 +249,15 @@ class ThreeStageNetwork():
 
 
     def load_weights(self, path):
+        """
+        This function is to continue training or to use a pretrained model,
+        it will load a file saved from the save_model() method above at the
+        given path. It will also set the pretrained flag to True.
+        """
 
         weights = torch.load(path)
 
+        self.pretrained = True
         self.trunk.load_state_dict(weights["trunk_state_dict"])
         self.embedder.load_state_dict(weights["embedder_state_dict"])
         self.classifier.load_state_dict(weights["classifier_state_dict"])
@@ -222,27 +266,87 @@ class ThreeStageNetwork():
         self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
 
 
-    def train(self,
-              batch_size,
-              n_epochs,
-              loss_ratios,
-              model_save_path="models", 
-              log_save_path="logs", 
-              training_data_path="data",
-              log_train=True):
+    def setup_data(self,
+                   path,
+                   batch_size=128, 
+                   num_workers=16, 
+                   train_labels=None, 
+                   load_indices=False, 
+                   indices_path=None,
+                   log_save_path="logs"):
+        """
+        This method is meant to be used prior to training in order
+        to get the appropriate dataloaders, datasets, indices etc...
+        I'm not sure if the need for this method suggests bad design?
 
-        self.log_train = log_train
-        # Get dataloaders
+        Inputs:
+            path str: the hdf5 dataset  path for training
+            batch_size int: the batch size used for training later
+            num_workers int: the number of workers to pass to training dataloader
+            train_labels None or array: the labels to train on, if none will train on all
+            load_indices Bool: whether to load train/val/holdout indices, usually used if
+                               you are continuing to train a pretrained model. Careful as
+                               incorrect loading of indices can result in test set leakage.
+            indices_path str: Where the indices you wish to load are located
+            log_save_path str: which directory to save training logs to, such as batch_history.csv
+        """
+
+        self.labels = h5py.File(path, "r")["labels"][:]
+        
+        if load_indices:
+            arr = np.load(indices_path)
+            train_indices, val_indices, holdout_indices = arr["train"], arr["val"], arr["holdout"]
+
+        else:
+            if self.pretrained is True:
+                warnings.warn("Picking random indices, dangerous if you are continuing training!")
+            train_indices, val_indices, holdout_indices = get_train_val_holdout_indices(labels=self.labels,
+                                                                                        train_labels=train_labels,
+                                                                                        train_split=0.8)
+            np.savez(log_save_path + "/data_indices.npz", train=train_indices, val=val_indices, holdout=holdout_indices)
+
         augmentations = data_augmentation(hflip=True,
                                           crop=False,
                                           colorjitter=False,
                                           rotations=False,
                                           affine=False,
                                           imagenet=True)
-        trainloader, val_dataset, train_ids, val_ids, holdout_ids, labels = get_dataloaders(h5_path=training_data_path,
-                                                                                            batch_size=batch_size,
-                                                                                            num_workers=20,
-                                                                                            augmentations=augmentations)
+
+        trainloader, val_dataset = get_dataloaders(h5_path=path,
+                                                   batch_size=batch_size,
+                                                   num_workers=num_workers,
+                                                   augmentations=augmentations,
+                                                   labels=self.labels,
+                                                   train_indices=train_indices)
+
+        self.trainloader = trainloader
+        self.val_dataset = val_dataset
+        self.train_indices = train_indices
+        self.val_indices = val_indices
+        self.holdout_indices = holdout_indices
+        self.batch_size = batch_size
+        self.log_save_path = log_save_path
+
+
+    def train(self,
+              n_epochs,
+              loss_ratios=[1,1,1,3],
+              model_save_path="models",
+              log_train=True):
+        """
+        This method is used for actually training the model, it is meant
+        to be called after the setup_data() method and won't function
+        properly without it as it will not have access to some attributes.
+
+        Inputs:
+            n_epochs int: the amount of epochs to train for
+            loss_ratios array: the ratios to pass to triplet, multisimilarity,
+                               proxy anchor and crossentropy in that order
+            model_save_path str: where to save models at checkpoints and at end
+            log_train Bool: whether to log the train files
+        """
+
+        self.log_train = log_train
 
         # Set up the GPU handle to report useage/vram useage
         nvmlInit()
@@ -260,8 +364,8 @@ class ThreeStageNetwork():
                          "Val_Accuracy":[],
                          "Learning_Rates":[],
                          "Time":[]}
-        batch_log_path = log_save_path + "/batch_history.csv"
-        epoch_log_path = log_save_path + "/epoch_history.csv"
+        batch_log_path = self.log_save_path + "/batch_history.csv"
+        epoch_log_path = self.log_save_path + "/epoch_history.csv"
 
         if self.log_train is True and os.path.exists(batch_log_path) is False:
             with open(batch_log_path, "a+") as f:
@@ -271,12 +375,11 @@ class ThreeStageNetwork():
                 writer = csv.writer(f)
                 writer.writerow(list(epoch_history.keys()))
 
-
         # This is purely used for model checkpoints to save the best epoch model
         best_val_accuracy = 0
 
         print(f"Starting training with {n_epochs} Epochs.")
-        n_iters = np.int(trainloader.sampler.__len__() / batch_size)
+        n_iters = np.int(self.trainloader.sampler.__len__() / self.batch_size)
         for epoch in range(n_epochs):
             # set our models to train mode
             self.trunk.train()
@@ -300,7 +403,7 @@ class ThreeStageNetwork():
 
             with tqdm(total=int(n_iters)) as t:
                 start_t = time()
-                for i, data in enumerate(trainloader):
+                for i, data in enumerate(self.trainloader):
                     inputs, labels = data
                     inputs, labels = inputs.to(self.device), labels.to(self.device)
 
@@ -322,7 +425,8 @@ class ThreeStageNetwork():
 
                     # mine interesting pairs
                     time_check = time()
-                    hard_pairs = self.miner(embeddings, labels)
+                    if loss_ratios[0] + loss_ratios[1] != 0:
+                        hard_pairs = self.miner(embeddings, labels)
                     performance_dict["Mining"] += time() - time_check
 
                     # compute loss, the conditionals are to speed up compute if a loss
@@ -352,7 +456,7 @@ class ThreeStageNetwork():
                     # compute mean using queue datastructure of length 2048//batch_size.
                     batch_acc_queue.append(calc_accuracy(logits, labels.cuda()))
                     batch_loss_queue.append(loss.item())
-                    if len(batch_acc_queue) >= 2048//batch_size:
+                    if len(batch_acc_queue) >= 2048//self.batch_size:
                         batch_acc_queue.pop(0)
                         batch_loss_queue.pop(0)
                     batch_acc = np.mean(batch_acc_queue)
@@ -390,17 +494,17 @@ class ThreeStageNetwork():
             performance_dict["Load_Data"] = performance_dict["Total"] - performance_dict["Load_Data"]
             performance_dict = {key:np.round(performance_dict[key], 2) for key in performance_dict}
 
-            with open(log_save_path + "/performance.json", "w") as json_file:
+            with open(self.log_save_path + "/performance.json", "w") as json_file:
                 json.dump(performance_dict, json_file)
             print(performance_dict)
 
             # Train accuracy, embeddings and potential UMAP
             print("Training")
-            em, lo, la, train_accuracy = self.get_embeddings_logits(val_dataset, train_ids)
+            em, lo, la, train_accuracy = self.get_embeddings_logits(self.val_dataset, self.train_indices)
 
             # Validation accuracy, loss, embeddings and potential UMAP
             print("Validation")
-            em, lo, la, val_accuracy = self.get_embeddings_logits(val_dataset, val_ids)
+            em, lo, la, val_accuracy = self.get_embeddings_logits(self.val_dataset, self.val_indices)
 
             # finally we log the batch metrics
             if self.log_train:
@@ -441,11 +545,11 @@ class ThreeStageNetwork():
                     "trunk_optimizer_state_dict": self.trunk_optimizer.state_dict(),
                     "embedder_optimizer_state_dict": self.embedder_optimizer.state_dict(),
                     "classifier_optimizer_state_dict": self.classifier_optimizer.state_dict(),
-                    }, model_save_path + "/models")
+                    }, model_save_path + "/models.h5")
 
                 # save the JSON including model details, this can be improved to take the mean
                 self.model_params["final_val_accuracy"] = best_val_accuracy
                 self.model_params["Time"] = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 self.model_params = {k:str(self.model_params[k]) for k in self.model_params}
-                with open(log_save_path + "/model_dict.json", "w") as json_file:
+                with open(self.log_save_path + "/model_dict.json", "w") as json_file:
                     json.dump(self.model_params, json_file)

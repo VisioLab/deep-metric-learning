@@ -203,8 +203,37 @@ class CustomDataLoader():
                                             t_label_ids)
 
 
+def get_train_val_holdout_indices(labels, train_labels=None, train_split=0.8):
 
-def get_dataloaders(h5_path="data.h5", batch_size=128, num_workers=3, augmentations=None, M=3):
+    # labels to train on, rest will be in holdout set, if none given select all classes
+    if train_labels is None:
+        train_labels = np.arange(101)
+
+    t_label_ids = []
+    for i in train_labels:
+        t_label_ids.append(np.where(i == labels))
+    t_label_ids = np.concatenate(t_label_ids, axis=1).squeeze()
+
+    train_indices = np.random.choice(t_label_ids,
+                                     int(len(t_label_ids)*train_split),
+                                     replace=False)
+    val_indices = np.setdiff1d(t_label_ids,
+                               train_indices)
+    # finally the leftover indices are our holdout set
+    holdout_indices = np.setdiff1d(np.arange(labels.shape[0]),
+                                   t_label_ids)
+
+    return train_indices, val_indices, holdout_indices
+
+
+def get_dataloaders(h5_path="data.h5",
+                    batch_size=128,
+                    num_workers=3, 
+                    augmentations=None, 
+                    M=3,
+                    labels=None,
+                    train_labels=None,
+                    train_indices=None):
     """
     This function loads the h5 file and instantiates a FoodData object, it then builds dataloaders
     for the train set and returns necessary information.
@@ -220,31 +249,11 @@ def get_dataloaders(h5_path="data.h5", batch_size=128, num_workers=3, augmentati
     val_transform = transforms.Compose([transforms.ToTensor(),
                                         transforms.Normalize([0.485, 0.456, 0.406],
                                                              [0.229, 0.224, 0.225])])
-
-    # we create our two datasets
-    labels = h5py.File(h5_path, "r")["labels"][:]
     
     # build our datasets using the train indices
     train_dataset = FoodData(h5_path, transform=train_transform)
     val_dataset = FoodData(h5_path, transform=val_transform)
 
-    # get our train and validation indices!
-    # first we get the indices associated with our train/val split
-    train_labels = np.arange(101)
-    t_label_ids = []
-    for i in train_labels:
-        t_label_ids.append(np.where(i == labels))
-    t_label_ids = np.concatenate(t_label_ids, axis=1).squeeze()
-    
-    # now we make our train and val indices by splitting 80/20
-    train_indices = np.random.choice(t_label_ids,
-                                     int(len(t_label_ids)*0.8),
-                                     replace=False)
-    val_indices = np.setdiff1d(t_label_ids,
-                               train_indices)
-    # finally the leftover indices are our holdout set
-    holdout_indices = np.setdiff1d(np.arange(labels.shape[0]),
-                                   t_label_ids)
     # initialize our samplers with the selected indices
     sampler = CustomSampler(M=M,
                             indices=train_indices,
@@ -256,4 +265,4 @@ def get_dataloaders(h5_path="data.h5", batch_size=128, num_workers=3, augmentati
             sampler=sampler,
             batch_size=batch_size, num_workers=num_workers)
 
-    return trainloader, val_dataset, train_indices, val_indices, holdout_indices, labels
+    return trainloader, val_dataset
