@@ -29,7 +29,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data.sampler import SubsetRandomSampler
 from torch.optim.lr_scheduler import ReduceLROnPlateau, ExponentialLR
-from torch.optim import Adam, RMSprop, AdamW
+from torch.optim import Adam, RMSprop, AdamW, SGD
 from torchvision import datasets, transforms
 import torchvision # to get access to the pretrained models
 from efficientnet_pytorch import EfficientNet
@@ -69,7 +69,7 @@ class Network(nn.Module):
             nn.Linear(layer_sizes[0], neuron_fc),
             nn.BatchNorm1d(neuron_fc),
             nn.ReLU(True),
-            #nn.Dropout(0.2),
+            nn.Dropout(0.2),
             nn.Linear(neuron_fc, layer_sizes[1]),
             #nn.Linear(layer_sizes[0], layer_sizes[1]),
         )
@@ -84,16 +84,16 @@ class ThreeStageNetwork():
                  num_classes=101,
                  embedding_size=512,
                  efficientnet_version="efficientnet-b0",
-                 trunk_optim=AdamW,
-                 embedder_optim=AdamW,
-                 classifier_optim=AdamW,
-                 trunk_lr=1e-3,
+                 trunk_optim=RMSprop,
+                 embedder_optim=RMSprop,
+                 classifier_optim=RMSprop,
+                 trunk_lr=1e-4,
                  embedder_lr=1e-3, 
                  classifier_lr=1e-3,
                  weight_decay=1.5e-6,
-                 trunk_decay=0.95,
-                 embedder_decay=0.95,
-                 classifier_decay=0.95):
+                 trunk_decay=0.98,
+                 embedder_decay=0.93,
+                 classifier_decay=0.93):
         """
         Inputs:
             num_classes int: Number of Classes (for Classifier purely)
@@ -136,13 +136,13 @@ class ThreeStageNetwork():
         self.classifier_scheduler = ExponentialLR(self.classifier_optimizer,  gamma=classifier_decay)
 
         # build pair based losses and the miner
-        self.triplet = losses.TripletMarginLoss(margin=2).cuda()
+        self.triplet = losses.TripletMarginLoss(margin=5).cuda()
         self.multisimilarity = losses.MultiSimilarityLoss(alpha = 2, beta = 50, base = 1).cuda()
         self.miner = miners.MultiSimilarityMiner(epsilon=0.1)
         # build proxy anchor loss
         self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.2, alpha = 32).cuda()
         self.proxy_optimizer = AdamW(self.proxy_anchor.parameters(), lr=trunk_lr*100, weight_decay=1.5E-6)
-        self.proxy_scheduler = ExponentialLR(self.proxy_optimizer, gamma=trunk_decay)
+        self.proxy_scheduler = ExponentialLR(self.proxy_optimizer, gamma=0.8)
         # finally crossentropy loss
         self.crossentropy = torch.nn.CrossEntropyLoss().cuda()
 
@@ -213,6 +213,15 @@ class ThreeStageNetwork():
         del temp_loader, temp_sampler
 
         return tot_embeds, tot_logits, tot_labels, np.mean(accuracies)
+
+
+    def save_all_logits_embeds(self, path):
+
+        tembeds, tlogits, tlabels, _ = self.get_embeddings_logits(self.val_dataset, self.train_indices, batch_size=256)
+        vembeds, vlogits, vlabels, _ = self.get_embeddings_logits(self.val_dataset, self.val_indices, batch_size=256)
+
+        np.savez(path, tembeds=tembeds, tlogits=tlogits, tlabels=tlabels,
+                       vembeds=vembeds, vlogits=vlogits, vlabels=vlabels)
 
 
     def image_inference(self, image):
@@ -386,6 +395,7 @@ class ThreeStageNetwork():
             self.trunk.train()
             self.embedder.train()
             self.classifier.train()
+            self.proxy_optimizer.train()
 
             # initialize our batch accuracy and loss parameters that are later used
             # to compute a rolling mean.

@@ -25,6 +25,9 @@ if __name__ == '__main__':
     model.train(n_epochs=10,
                 loss_ratios=[1,1,1,3])
 
+    # let's get the embeddings and save those too for some visualization
+    model.save_all_logits_embeds("logs/logits_embeds.npz")
+
     # finish experiment and zip up
     experiment_id = zip_files(["models", "logs"],
                               experiment_id=21)
