@@ -2,7 +2,7 @@
 
 This repository contains code for my MSc Thesis and work at VisioLab. It focuses on the development of a deep metric learning model for incremental learning in the classification regime. For a deep overview of the theory and design decisions behind the architecture refer to my MSc thesis which will be added to the repository.
 
-![demo_training](.\images\demo_training.gif)
+![demo_training](./images/demo_training.gif)
 
 ## Three Stage Architecture
 
