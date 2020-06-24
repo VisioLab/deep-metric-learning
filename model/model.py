@@ -63,12 +63,13 @@ from data.autoaugment import ImageNetPolicy
 
 class Network(nn.Module):
 
-    def __init__(self, layer_sizes, neuron_fc=512):
+    def __init__(self, layer_sizes, neuron_fc=4096):
         super().__init__()
         self.classifier = nn.Sequential(
             nn.Linear(layer_sizes[0], neuron_fc),
+            nn.BatchNorm1d(neuron_fc),
             nn.ReLU(True),
-            nn.Dropout(0.5),
+            #nn.Dropout(0.2),
             nn.Linear(neuron_fc, layer_sizes[1]),
             #nn.Linear(layer_sizes[0], layer_sizes[1]),
         )
@@ -100,7 +101,7 @@ class ThreeStageNetwork():
         self.num_classes = num_classes
         self.embedding_size = embedding_size
         self.efficientnet_version = efficientnet_version
-        self.trunk = EfficientNet.from_pretrained(efficientnet_version, num_classes=1024)
+        self.trunk = EfficientNet.from_pretrained(efficientnet_version, num_classes=2048)
         self.model_output_size = self.trunk._fc.in_features
         self.trunk._fc = torch.nn.Identity()
         self.trunk = nn.DataParallel(self.trunk.to(self.device))
@@ -122,7 +123,7 @@ class ThreeStageNetwork():
         self.multisimilarity = losses.MultiSimilarityLoss(alpha = 2, beta = 50, base = 1).cuda()
         self.miner = miners.MultiSimilarityMiner(epsilon=0.1)
         # build proxy anchor loss
-        self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.1, alpha = 32).cuda()
+        self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.2, alpha = 32).cuda()
         self.proxy_optimizer = AdamW(self.proxy_anchor.parameters(), lr=trunk_lr*100, weight_decay=1.5E-6)
         self.proxy_scheduler = ExponentialLR(self.proxy_optimizer, gamma=trunk_decay)
         # finally crossentropy loss
@@ -130,25 +131,15 @@ class ThreeStageNetwork():
 
         # log some of this information
         self.model_params = {"Trunk_Model":self.efficientnet_version,
-                             "Optimizers":[str(self.trunk_optim), str(self.embedder_optim), str(self.classifier_optim)],
+                             "Optimizers":[str(self.trunk_optimizer),
+                                           str(self.embedder_optimizer),
+                                           str(self.classifier_optimizer)],
                              "Embedder":str(self.embedder),
                              "Weight_Decay":weight_decay,
                              "Scheduler_Decays":[trunk_decay, embedder_decay, classifier_decay],
                              "Embedding_Size":embedding_size,
                              "Learning_Rates":[trunk_lr, embedder_lr, classifier_lr],
                              "Miner":str(self.miner)}
-
-
-    def load_weights(self, path):
-
-        weights = torch.load(path)
-
-        self.trunk.load_state_dict(weights["trunk_state_dict"])
-        self.embedder.load_state_dict(weights["embedder_state_dict"])
-        self.classifier.load_state_dict(weights["classifier_state_dict"])
-        self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
-        self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
-        self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
 
 
     def get_embeddings_logits(self, dataset, indices, batch_size=256):
@@ -216,7 +207,19 @@ class ThreeStageNetwork():
                 "trunk_optimizer_state_dict": self.trunk_optimizer.state_dict(),
                 "embedder_optimizer_state_dict": self.embedder_optimizer.state_dict(),
                 "classifier_optimizer_state_dict": self.classifier_optimizer.state_dict(),
-                }, path + "/models")
+                }, path + "/models.h5")
+
+
+    def load_weights(self, path):
+
+        weights = torch.load(path)
+
+        self.trunk.load_state_dict(weights["trunk_state_dict"])
+        self.embedder.load_state_dict(weights["embedder_state_dict"])
+        self.classifier.load_state_dict(weights["classifier_state_dict"])
+        self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
+        self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
+        self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
 
 
     def train(self,
@@ -322,13 +325,18 @@ class ThreeStageNetwork():
                     hard_pairs = self.miner(embeddings, labels)
                     performance_dict["Mining"] += time() - time_check
 
-                    # compute loss
+                    # compute loss, the conditionals are to speed up compute if a loss
+                    # has been switched off.
                     time_check = time()
                     loss = 0
-                    loss += self.triplet(embeddings, labels, hard_pairs) * loss_ratios[0]
-                    loss += self.multisimilarity(embeddings, labels, hard_pairs) * loss_ratios[1]
-                    loss += self.proxy_anchor(embeddings, labels) * loss_ratios[2]
-                    loss += self.crossentropy(logits, labels.cuda().long()) * loss_ratios[3]
+                    if loss_ratios[0] != 0:
+                        loss += self.triplet(embeddings, labels, hard_pairs) * loss_ratios[0]
+                    if loss_ratios[1] != 0:
+                        loss += self.multisimilarity(embeddings, labels, hard_pairs) * loss_ratios[1]
+                    if loss_ratios[2] != 0:
+                        loss += self.proxy_anchor(embeddings, labels) * loss_ratios[2]
+                    if loss_ratios[3] != 0:
+                        loss += self.crossentropy(logits, labels.cuda().long()) * loss_ratios[3]
                     loss.backward()
                     performance_dict["Compute_Loss"] += time() - time_check
 
