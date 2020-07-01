@@ -38,7 +38,6 @@ class FoodData(torch.utils.data.Dataset):
             return f["labels"].shape[0]
 
 
-
 class CustomSampler(torch.utils.data.Sampler):
 
     def __init__(self, M, indices, labels):
@@ -55,7 +54,7 @@ class CustomSampler(torch.utils.data.Sampler):
         self.list_size = len(indices)
         if self.M*self.unique_labels.shape[0] < self.list_size:
             self.list_size -= (self.list_size) % (self.M*self.unique_labels.shape[0])
-        
+
         self.valid_labels = np.unique(labels[indices])
 
     def get_label_indices(self, labels):
@@ -65,18 +64,20 @@ class CustomSampler(torch.utils.data.Sampler):
         For example if the labels are [1, 1, 2, 3, 4, 5] then this func returns:
             >>> defaultdict(list,
                             {1: array([0, 1]),
-                            2: array([2]),
-                            3: array([3]),
-                            4: array([4]),
-                            5: array([5])})
+                             2: array([2]),
+                             3: array([3]),
+                             4: array([4]),
+                             5: array([5])})
 
         Inputs:
             labels - the array of labels to build into a dictionary
         Returns:
             label_indices - a dictionary as outlined above
         """
+
         # init an empty dict
         label_indices = collections.defaultdict(list)
+
         # fill our dict by going over the given indices and finding associated labels
         for i in self.indices:
             label_indices[labels[i]].append(i)
@@ -124,7 +125,7 @@ def data_augmentation(hflip=True,
     if crop:
         augments.append(transforms.RandomResizedCrop(scale=(0.1, 1),
                                                     ratio=(0.75, 1.33),
-                                                    size=128))
+                                                    size=224))
     if colorjitter:
         augments.append(transforms.ColorJitter(brightness=0.3,
                                         contrast=0.2,
@@ -133,7 +134,7 @@ def data_augmentation(hflip=True,
     if rotations:
         augments.append(transforms.RandomRotation(degrees=(-5, 5),
                                             expand=True))
-        augments.append(transforms.Resize(128))
+        augments.append(transforms.Resize(224))
     if affine:
         augments.append(transforms.RandomAffine(degrees=5))
 
@@ -141,66 +142,6 @@ def data_augmentation(hflip=True,
         augments.append(ImageNetPolicy())
 
     return augments
-
-
-class CustomDataLoader():
-
-    def __init__(self,
-                 h5_path,
-                 train_labels=np.arange(101),
-                 batch_size=128, 
-                 num_workers=3,
-                 augmentations=None,
-                 train_split=0.8,
-                 M=3):
-        """
-        Inputs:
-            h5_path str: the path of our dataset to pass to h5py.File
-            train_labels np.array: the labels to train on
-            batch_size int: the batch size of our dataloaders
-            num_workers int: number of workers for DataLoaders
-            augmentations transforms or None: transformations to apply to train set
-            train_split float: train/val split, 0.8 -> 80%/20%
-            M int: samples per class to return in trainloader CustomSampler
-        """
-        
-        self.labels = h5py.File(h5_path, "r")["labels"][:]
-        self.augmentations = augmentations
-        self.train_labels = train_labels
-        self.batch_size = batch_size
-        self.M = M
-
-        # build the transforms now
-        normalize = transforms.Normalize([0.485, 0.456, 0.406],
-                                         [0.229, 0.224, 0.225])
-        transformations = [transforms.ToTensor(),
-                           normalize]
-        if augmentations is not None:
-            transformations = augmentations + transformations
-
-        self.train_transform = transforms.Compose(transformations)
-        self.val_transform = transforms.Compose([transforms.ToTensor(),
-                                                 normalize])
-
-        self.train_dataset = FoodData(h5_path, transform=train_transform)
-        self.val_dataset = FoodData(h5_path, transform=val_transform)
-
-        # get our train and validation indices!
-        # first we get the indices associated with our train/val split
-        t_label_ids = []
-        for i in train_labels:
-            t_label_ids.append(np.where(i == labels))
-        t_label_ids = np.concatenate(t_label_ids, axis=1).squeeze()
-        
-        # now we make our train and val indices by splitting 80/20
-        self.train_indices = np.random.choice(t_label_ids,
-                                              int(len(t_label_ids)*train_split),
-                                              replace=False)
-        self.val_indices = np.setdiff1d(the_label_ids,
-                                        self.train_indices)
-        # finally the leftover indices are our holdout set
-        self.holdout_indices = np.setdiff1d(np.arange(labels.shape[0]),
-                                            t_label_ids)
 
 
 def get_train_val_holdout_indices(labels, train_labels=None, train_split=0.8):
@@ -225,8 +166,9 @@ def get_train_val_holdout_indices(labels, train_labels=None, train_split=0.8):
 
     return train_indices, val_indices, holdout_indices
 
-
-def get_dataloaders(h5_path="data.h5",
+ 
+def get_dataloaders(dataset,
+                    h5_path="data.h5",
                     batch_size=128,
                     num_workers=3, 
                     augmentations=None, 
@@ -239,20 +181,25 @@ def get_dataloaders(h5_path="data.h5",
     for the train set and returns necessary information.
     """
 
-    transformations = [transforms.ToTensor(),
+    transformations = [transforms.Resize(224),
+                       transforms.CenterCrop(224),
+                       transforms.ToTensor(),
                        transforms.Normalize([0.485, 0.456, 0.406],
                                             [0.229, 0.224, 0.225])]
     if augmentations is not None:
         transformations = augmentations + transformations
 
     train_transform = transforms.Compose(transformations)
-    val_transform = transforms.Compose([transforms.ToTensor(),
+    val_transform = transforms.Compose([transforms.Resize(224),
+                                        transforms.CenterCrop(224),
+                                        transforms.ToTensor(),
                                         transforms.Normalize([0.485, 0.456, 0.406],
                                                              [0.229, 0.224, 0.225])])
     
     # build our datasets using the train indices
-    train_dataset = FoodData(h5_path, transform=train_transform)
-    val_dataset = FoodData(h5_path, transform=val_transform)
+    train_dataset = dataset(h5_path, transform=train_transform)
+    val_dataset = dataset(h5_path, transform=val_transform)
+
 
     # initialize our samplers with the selected indices
     sampler = CustomSampler(M=M,

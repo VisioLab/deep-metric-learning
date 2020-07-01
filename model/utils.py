@@ -12,7 +12,7 @@ from zipfile import ZipFile
 import os
 
 
-def umap_plot(umap_embeddings, labels, save_path=None):
+def umap_plot(umap_embeddings, labels, save_path=None, save_plot=False):
     """
     This is primarily from Kevins hook example in pytorch-metric-learning library
 

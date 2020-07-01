@@ -66,7 +66,16 @@ class ImageNetPolicy(object):
 
 class SubPolicy(object):
     def __init__(self, p1, operation1, magnitude_idx1, p2, operation2, magnitude_idx2, fillcolor=(128, 128, 128)):
-        ranges = {
+
+        self.fillcolor = fillcolor
+        self.magnitude_idx2 = magnitude_idx2
+        self.operation2 = operation2
+        self.p2 = p2
+        self.magnitude_idx1 = magnitude_idx1
+        self.operation1 = operation1
+        self.p1 = p1
+
+        self.ranges = {
             "shearX": np.linspace(0, 0.3, 10),
             "shearY": np.linspace(0, 0.3, 10),
             "translateX": np.linspace(0, 150 / 331, 10),
@@ -83,45 +92,121 @@ class SubPolicy(object):
             "invert": [0] * 10
         }
 
-        # from https://stackoverflow.com/questions/5252170/specify-image-filling-color-when-rotating-in-python-with-pil-and-setting-expand
-        def rotate_with_fill(img, magnitude):
-            rot = img.convert("RGBA").rotate(magnitude)
-            return Image.composite(rot, Image.new("RGBA", rot.size, (128,) * 4), rot).convert(img.mode)
-
-        func = {
-            "shearX": lambda img, magnitude: img.transform(
-                img.size, Image.AFFINE, (1, magnitude * random.choice([-1, 1]), 0, 0, 1, 0),
-                Image.BICUBIC, fillcolor=fillcolor),
-            "shearY": lambda img, magnitude: img.transform(
-                img.size, Image.AFFINE, (1, 0, 0, magnitude * random.choice([-1, 1]), 1, 0),
-                Image.BICUBIC, fillcolor=fillcolor),
-            "translateX": lambda img, magnitude: img.transform(
-                img.size, Image.AFFINE, (1, 0, magnitude * img.size[0] * random.choice([-1, 1]), 0, 1, 0),
-                fillcolor=fillcolor),
-            "translateY": lambda img, magnitude: img.transform(
-                img.size, Image.AFFINE, (1, 0, 0, 0, 1, magnitude * img.size[1] * random.choice([-1, 1])),
-                fillcolor=fillcolor),
-            "rotate": lambda img, magnitude: rotate_with_fill(img, magnitude),
-            "color": lambda img, magnitude: ImageEnhance.Color(img).enhance(1 + magnitude * random.choice([-1, 1])),
-            "posterize": lambda img, magnitude: ImageOps.posterize(img, magnitude),
-            "solarize": lambda img, magnitude: ImageOps.solarize(img, magnitude),
-            "contrast": lambda img, magnitude: ImageEnhance.Contrast(img).enhance(
-                1 + magnitude * random.choice([-1, 1])),
-            "sharpness": lambda img, magnitude: ImageEnhance.Sharpness(img).enhance(
-                1 + magnitude * random.choice([-1, 1])),
-            "brightness": lambda img, magnitude: ImageEnhance.Brightness(img).enhance(
-                1 + magnitude * random.choice([-1, 1])),
-            "autocontrast": lambda img, magnitude: ImageOps.autocontrast(img),
-            "equalize": lambda img, magnitude: ImageOps.equalize(img),
-            "invert": lambda img, magnitude: ImageOps.invert(img)
+        self.func = {
+        "shearX": self.shearX,
+        "shearY": self.shearY,
+        "translateX": self.translateX,
+        "translateY": self.translateY,
+        "rotate": self.rotate,
+        "color": self.color,
+        "posterize": self.posterize,
+        "solarize": self.solarize,
+        "contrast": self.contrast,
+        "sharpness": self.sharpness,
+        "brightness": self.brightness,
+        "autocontrast": self.autocontrast,
+        "equalize": self.equalize,
+        "invert": self.invert
         }
 
         self.p1 = p1
-        self.operation1 = func[operation1]
-        self.magnitude1 = ranges[operation1][magnitude_idx1]
+        self.operation1 = self.func[operation1]
+        self.magnitude1 = self.ranges[operation1][magnitude_idx1]
         self.p2 = p2
-        self.operation2 = func[operation2]
-        self.magnitude2 = ranges[operation2][magnitude_idx2]
+        self.operation2 = self.func[operation2]
+        self.magnitude2 = self.ranges[operation2][magnitude_idx2]
+
+    # from https://stackoverflow.com/questions/5252170/specify-image-filling-color-when-rotating-in-python-with-pil-and-setting-expand
+    def rotate_with_fill(self, img, magnitude):
+        rot = img.convert("RGBA").rotate(magnitude)
+        return Image.composite(rot, Image.new("RGBA", rot.size, (128,) * 4), rot).convert(img.mode)
+
+    def shearX(self, img, magnitude):
+        return img.transform(
+                img.size, Image.AFFINE, (1, magnitude * random.choice([-1, 1]), 0, 0, 1, 0),
+                Image.BICUBIC, fillcolor=self.fillcolor)
+
+    def shearY(self, img, magnitude):
+        return img.transform(
+            img.size, Image.AFFINE, (1, 0, 0, magnitude * random.choice([-1, 1]), 1, 0),
+            Image.BICUBIC, fillcolor=self.fillcolor)
+
+    def translateX(self, img, magnitude):
+        return img.transform(
+            img.size, Image.AFFINE, (1, 0, magnitude * img.size[0] * random.choice([-1, 1]), 0, 1, 0),
+            fillcolor=self.fillcolor)
+
+    def translateY(self, img, magnitude):
+        return img.transform(
+            img.size, Image.AFFINE, (1, 0, 0, 0, 1, magnitude * img.size[1] * random.choice([-1, 1])),
+            fillcolor=self.fillcolor)
+
+    def rotate(self, img, magnitude):
+        return self.rotate_with_fill(img, magnitude)
+
+    def color(self, img, magnitude):
+        return ImageEnhance.Color(img).enhance(1 + magnitude * random.choice([-1, 1]))
+
+    def posterize(self, img, magnitude):
+        return ImageOps.posterize(img, magnitude)
+
+    def solarize(self, img, magnitude):
+        return ImageEnhance.Contrast(img).enhance(
+            1 + magnitude * random.choice([-1, 1]))
+
+    def contrast(self, img, magnitude):
+        return ImageEnhance.Contrast(img).enhance(
+            1 + magnitude * random.choice([-1, 1]))
+
+    def sharpness(self, img, magnitude):
+        return  ImageEnhance.Sharpness(img).enhance(
+            1 + magnitude * random.choice([-1, 1]))
+
+    def brightness(self, img, magnitude):
+        return ImageEnhance.Brightness(img).enhance(
+            1 + magnitude * random.choice([-1, 1]))
+
+    def autocontrast(self, img, magnitude):
+        return ImageOps.autocontrast(img)
+
+    def equalize(self, img, magnitude):
+        return ImageOps.equalize(img)
+
+    def invert(self, img, magnitude):
+        return ImageOps.invert(img)
+
+
+
+
+        # func = {
+        #     "shearX": lambda img, magnitude: img.transform(
+        #         img.size, Image.AFFINE, (1, magnitude * random.choice([-1, 1]), 0, 0, 1, 0),
+        #         Image.BICUBIC, fillcolor=fillcolor),
+        #     "shearY": lambda img, magnitude: img.transform(
+        #         img.size, Image.AFFINE, (1, 0, 0, magnitude * random.choice([-1, 1]), 1, 0),
+        #         Image.BICUBIC, fillcolor=fillcolor),
+        #     "translateX": lambda img, magnitude: img.transform(
+        #         img.size, Image.AFFINE, (1, 0, magnitude * img.size[0] * random.choice([-1, 1]), 0, 1, 0),
+        #         fillcolor=fillcolor),
+        #     "translateY": lambda img, magnitude: img.transform(
+        #         img.size, Image.AFFINE, (1, 0, 0, 0, 1, magnitude * img.size[1] * random.choice([-1, 1])),
+        #         fillcolor=fillcolor),
+        #     "rotate": lambda img, magnitude: rotate_with_fill(img, magnitude),
+        #     "color": lambda img, magnitude: ImageEnhance.Color(img).enhance(1 + magnitude * random.choice([-1, 1])),
+        #     "posterize": lambda img, magnitude: ImageOps.posterize(img, magnitude),
+        #     "solarize": lambda img, magnitude: ImageOps.solarize(img, magnitude),
+        #     "contrast": lambda img, magnitude: ImageEnhance.Contrast(img).enhance(
+        #         1 + magnitude * random.choice([-1, 1])),
+        #     "sharpness": lambda img, magnitude: ImageEnhance.Sharpness(img).enhance(
+        #         1 + magnitude * random.choice([-1, 1])),
+        #     "brightness": lambda img, magnitude: ImageEnhance.Brightness(img).enhance(
+        #         1 + magnitude * random.choice([-1, 1])),
+        #     "autocontrast": lambda img, magnitude: ImageOps.autocontrast(img),
+        #     "equalize": lambda img, magnitude: ImageOps.equalize(img),
+        #     "invert": lambda img, magnitude: ImageOps.invert(img)
+        # }
+
+        
 
 
     def __call__(self, img):
