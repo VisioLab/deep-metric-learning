@@ -12,7 +12,7 @@ This repository contains code for my MSc Thesis and work at VisioLab. It focuses
 
 Due to relative imports, and the general directory design, this model is currently only meant to be used through `main.py`.  The simplest way to start is to import the architecture, instantiate it and then run train with your preferred hyperparameters on your dataset.
 
-Here is a full example: [Clean Food Transfer Learning Example](https://github.com/VisioLab/deep-metric-learning/blob/master/Fine-Tuning Example.ipynb) |[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/alexisdrakopoulos/be0ce2fb2cabb182387a81840202da26/fine-tuning-example.ipynb)
+Here is a full example: [Clean Food Transfer Learning Example](https://github.com/VisioLab/deep-metric-learning/blob/master/Fine-Tuning%20Example.ipynb) |[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/gist/alexisdrakopoulos/be0ce2fb2cabb182387a81840202da26/fine-tuning-example.ipynb)
 
 However a simpler example for training from scratch and fine tuning would be
 
