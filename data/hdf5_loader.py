@@ -197,8 +197,12 @@ def get_dataloaders(dataset,
                                                              [0.229, 0.224, 0.225])])
     
     # build our datasets using the train indices
-    train_dataset = dataset(h5_path, transform=train_transform)
-    val_dataset = dataset(h5_path, transform=val_transform)
+    if h5_path is None:
+        train_dataset = dataset(transform=train_transform)
+        val_dataset = dataset(transform=val_transform)
+    else:
+        train_dataset = dataset(h5_path, transform=train_transform)
+        val_dataset = dataset(h5_path, transform=val_transform)
 
 
     # initialize our samplers with the selected indices

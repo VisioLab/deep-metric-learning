@@ -37,8 +37,8 @@ from efficientnet_pytorch import EfficientNet
 # plotting libraries
 from tqdm.auto import tqdm
 from PIL import Image
-import matplotlib.pyplot as plt
-from cycler import cycler # some plotting thing
+#import matplotlib.pyplot as plt
+#from cycler import cycler # some plotting thing
 
 # file management
 import h5py
@@ -95,7 +95,8 @@ class ThreeStageNetwork():
                  trunk_decay=0.98,
                  embedder_decay=0.93,
                  classifier_decay=0.93,
-                 log_train=True):
+                 log_train=True,
+                 gpu_id=0):
         """
         Inputs:
             num_classes int: Number of Classes (for Classifier purely)
@@ -113,7 +114,9 @@ class ThreeStageNetwork():
             classifier_decay float: The multiplier for the Scheduler y_{t+1} <- classifier_decay * y_{t}
         """
 
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.gpu_id = gpu_id
+        #self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device(f"cuda")
         self.pretrained = False # this is used to load the indices for train/val data for now
         self.log_train = log_train
 
@@ -151,15 +154,15 @@ class ThreeStageNetwork():
         self.classifier_scheduler = ExponentialLR(self.classifier_optimizer,  gamma=classifier_decay)
 
         # build pair based losses and the miner
-        self.triplet = losses.TripletMarginLoss(margin=5).cuda()
-        self.multisimilarity = losses.MultiSimilarityLoss(alpha = 2, beta = 50, base = 1).cuda()
+        self.triplet = losses.TripletMarginLoss(margin=5).to(self.device)
+        self.multisimilarity = losses.MultiSimilarityLoss(alpha = 2, beta = 50, base = 1).to(self.device)
         self.miner = miners.MultiSimilarityMiner(epsilon=0.1)
         # build proxy anchor loss
-        self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.2, alpha = 32).cuda()
+        self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.2, alpha = 32).to(self.device)
         self.proxy_optimizer = AdamW(self.proxy_anchor.parameters(), lr=trunk_lr*100, weight_decay=1.5E-6)
         self.proxy_scheduler = ExponentialLR(self.proxy_optimizer, gamma=0.8)
         # finally crossentropy loss
-        self.crossentropy = torch.nn.CrossEntropyLoss().cuda()
+        self.crossentropy = torch.nn.CrossEntropyLoss().to(self.device)
 
         # log some of this information
         self.model_params = {"Trunk_Model":self.efficientnet_version,
@@ -220,7 +223,7 @@ class ThreeStageNetwork():
                     logits = self.classifier(embeds)
 
                     # embeds -> to cpu and then to array
-                    accuracies.append(calc_accuracy(logits, labels.cuda()))
+                    accuracies.append(calc_accuracy(logits, labels.to(self.device)))
                     tot_embeds.append(embeds.cpu().numpy())
                     tot_logits.append(logits.cpu().numpy())
                     tot_labels.append(labels.cpu().numpy())
@@ -267,7 +270,7 @@ class ThreeStageNetwork():
         self.classifier.eval()
 
         with torch.no_grad():
-            fc_out = self.trunk(image.cuda())
+            fc_out = self.trunk(image.to(self.device))
             embeds = self.embedder(fc_out)
             logits = self.classifier(embeds)
 
@@ -292,7 +295,7 @@ class ThreeStageNetwork():
                 }, path + "/models.h5")
 
 
-    def load_weights(self, path, load_classifier=True):
+    def load_weights(self, path, load_trunk=True, load_embedder=True, load_classifier=True):
         """
         This function is to continue training or to use a pretrained model,
         it will load a file saved from the save_model() method above at the
@@ -302,20 +305,30 @@ class ThreeStageNetwork():
         weights = torch.load(path)
 
         self.pretrained = True
-        self.trunk.load_state_dict(weights["trunk_state_dict"])
-        self.embedder.load_state_dict(weights["embedder_state_dict"])
+        loaded = []
+
+        if load_trunk:
+            self.trunk.load_state_dict(weights["trunk_state_dict"])
+            self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
+            loaded.append("Trunk")
+
+        if load_embedder:
+            self.embedder.load_state_dict(weights["embedder_state_dict"])
+            self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
+            loaded.append("Embedder")
+
         if load_classifier:
             self.classifier.load_state_dict(weights["classifier_state_dict"])
-        self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
-        self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
-        if load_classifier:
             self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
+            loaded.append("Classifier")
+
+        print("Loaded pretrained weights for", path, "for", loaded)
 
 
     def setup_data(self,
                    dataset,
                    h5_path=None,
-                   batch_size=128, 
+                   batch_size=128,
                    num_workers=16,
                    M=3,
                    train_split=0.8,
@@ -343,14 +356,17 @@ class ThreeStageNetwork():
             log_save_path str: which directory to save training logs to, such as batch_history.csv
         """
 
-        if labels is None:
+        if labels is None and h5_path is not None:
             self.labels = h5py.File(h5_path, "r")["labels"][:]
         else:
             self.labels = labels
-        
+
         if load_indices:
             arr = np.load(indices_path)
             train_indices, val_indices, holdout_indices = arr["train"], arr["val"], arr["holdout"]
+            print(train_indices)
+            print(arr["train"])
+            print(indices_path)
 
         else:
             if self.pretrained is True:
@@ -407,9 +423,11 @@ class ThreeStageNetwork():
             log_train Bool: whether to log the train files
         """
 
+        self.model_params["Loss_Ratios"] = loss_ratios
+
         # Set up the GPU handle to report useage/vram useage
         nvmlInit()
-        handle = nvmlDeviceGetHandleByIndex(0)
+        handle = nvmlDeviceGetHandleByIndex(self.gpu_id)
 
         # Set up the logging
         self.batch_history = {"Iteration":[],
@@ -493,17 +511,22 @@ class ThreeStageNetwork():
                     # has been switched off.
                     time_check = time()
                     loss = 0
+                    curr_losses = []
                     if loss_ratios[0] != 0:
                         triplet_loss_curr = self.triplet(embeddings, labels, hard_pairs)
+                        curr_losses.append(triplet_loss_curr.item() * loss_ratios[0])
                         loss += triplet_loss_curr * loss_ratios[0]
                     if loss_ratios[1] != 0:
                         ms_loss_curr = self.multisimilarity(embeddings, labels, hard_pairs)
+                        curr_losses.append(ms_loss_curr.item() * loss_ratios[1])
                         loss += ms_loss_curr * loss_ratios[1]
                     if loss_ratios[2] != 0:
                         proxy_loss_curr = self.proxy_anchor(embeddings, labels)
+                        curr_losses.append(proxy_loss_curr.item() * loss_ratios[2])
                         loss += proxy_loss_curr * loss_ratios[2]
                     if loss_ratios[3] != 0:
-                        cse_loss_curr = self.crossentropy(logits, labels.cuda().long())
+                        cse_loss_curr = self.crossentropy(logits, labels.to(self.device).long())
+                        curr_losses.append(cse_loss_curr.item() * loss_ratios[3])
                         loss += cse_loss_curr * loss_ratios[3]
                     loss.backward()
                     performance_dict["Compute_Loss"] += time() - time_check
@@ -518,7 +541,7 @@ class ThreeStageNetwork():
 
                     time_check = time()
                     # compute mean using queue datastructure of length 2048//batch_size.
-                    batch_acc_queue.append(calc_accuracy(logits, labels.cuda()))
+                    batch_acc_queue.append(calc_accuracy(logits, labels.to(self.device)))
                     batch_loss_queue.append(loss.item())
                     if len(batch_acc_queue) >= 2048//self.batch_size:
                         batch_acc_queue.pop(0)
@@ -551,7 +574,8 @@ class ThreeStageNetwork():
                     t.set_postfix(loss=batch_loss, 
                                   acc=batch_acc, 
                                   gpu=res.gpu, 
-                                  gpuram=res.memory)
+                                  gpuram=res.memory,
+                                  losses= [np.round(i,2) for i in curr_losses])
                     t.update()
                     performance_dict["Logging"] += time() - time_check
 
