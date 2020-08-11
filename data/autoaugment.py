@@ -37,25 +37,24 @@ class ImageNetPolicy(object):
             SubPolicy(0.8, "rotate", 8, 0.4, "color", 0, fillcolor),
             SubPolicy(0.4, "rotate", 9, 0.6, "equalize", 2, fillcolor),
             SubPolicy(0.0, "equalize", 7, 0.8, "equalize", 8, fillcolor),
-            SubPolicy(0.6, "invert", 4, 1.0, "equalize", 8, fillcolor),
             SubPolicy(0.6, "color", 4, 1.0, "contrast", 8, fillcolor),
 
             SubPolicy(0.8, "rotate", 8, 1.0, "color", 2, fillcolor),
             SubPolicy(0.8, "color", 8, 0.8, "solarize", 7, fillcolor),
-            SubPolicy(0.4, "sharpness", 7, 0.6, "invert", 8, fillcolor),
             SubPolicy(0.6, "shearX", 5, 1.0, "equalize", 9, fillcolor),
             SubPolicy(0.4, "color", 0, 0.6, "equalize", 3, fillcolor),
 
             SubPolicy(0.4, "equalize", 7, 0.2, "solarize", 4, fillcolor),
             SubPolicy(0.6, "solarize", 5, 0.6, "autocontrast", 5, fillcolor),
-            SubPolicy(0.6, "invert", 4, 1.0, "equalize", 8, fillcolor),
             SubPolicy(0.6, "color", 4, 1.0, "contrast", 8, fillcolor),
             SubPolicy(0.8, "equalize", 8, 0.6, "equalize", 3, fillcolor)
         ]
 
 
-    def __call__(self, img):
+    def __call__(self, img, choose_policy=None):
         policy_idx = random.randint(0, len(self.policies) - 1)
+        if choose_policy is not None:
+            return self.policies[choose_policy](img)
         return self.policies[policy_idx](img)
 
     def __repr__(self):
@@ -83,13 +82,12 @@ class SubPolicy(object):
             "rotate": np.linspace(0, 30, 10),
             "color": np.linspace(0.0, 0.9, 10),
             "posterize": np.round(np.linspace(8, 4, 10), 0).astype(np.int),
-            "solarize": np.linspace(256, 0, 10),
+            "solarize": np.linspace(5, 0, 10),
             "contrast": np.linspace(0.0, 0.9, 10),
             "sharpness": np.linspace(0.0, 0.9, 10),
             "brightness": np.linspace(0.0, 0.9, 10),
             "autocontrast": [0] * 10,
-            "equalize": [0] * 10,
-            "invert": [0] * 10
+            "equalize": [0] * 10
         }
 
         self.func = {
@@ -105,8 +103,7 @@ class SubPolicy(object):
         "sharpness": self.sharpness,
         "brightness": self.brightness,
         "autocontrast": self.autocontrast,
-        "equalize": self.equalize,
-        "invert": self.invert
+        "equalize": self.equalize
         }
 
         self.p1 = p1
@@ -152,7 +149,7 @@ class SubPolicy(object):
 
     def solarize(self, img, magnitude):
         return ImageEnhance.Contrast(img).enhance(
-            1 + magnitude * random.choice([-1, 1]))
+            1 + magnitude)
 
     def contrast(self, img, magnitude):
         return ImageEnhance.Contrast(img).enhance(
@@ -172,8 +169,6 @@ class SubPolicy(object):
     def equalize(self, img, magnitude):
         return ImageOps.equalize(img)
 
-    def invert(self, img, magnitude):
-        return ImageOps.invert(img)
 
 
 

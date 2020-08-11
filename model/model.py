@@ -17,13 +17,14 @@ Third party libraries:
 import argparse
 import collections
 import numpy as np
+import functools
 
 # Import pytorch metric learning stuff
-import pytorch_metric_learning
 from pytorch_metric_learning import losses, miners, samplers
 
 # import pytorch stuff
 import torch
+from torch.cuda.amp import autocast
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -31,14 +32,13 @@ from torch.utils.data.sampler import SubsetRandomSampler
 from torch.optim.lr_scheduler import ReduceLROnPlateau, ExponentialLR
 from torch.optim import Adam, RMSprop, AdamW, SGD
 from torchvision import datasets, transforms
+import torchvision.models as models
 import torchvision # to get access to the pretrained models
 from efficientnet_pytorch import EfficientNet
 
 # plotting libraries
 from tqdm.auto import tqdm
 from PIL import Image
-#import matplotlib.pyplot as plt
-#from cycler import cycler # some plotting thing
 
 # file management
 import h5py
@@ -78,13 +78,12 @@ class Network(nn.Module):
         return self.classifier(x)
 
 
-
 class ThreeStageNetwork():
 
     def __init__(self,
                  num_classes=101,
                  embedding_size=512,
-                 efficientnet_version="efficientnet-b0",
+                 trunk_architecture="efficientnet-b0",
                  trunk_optim="RMSprop",
                  embedder_optim="RMSprop",
                  classifier_optim="RMSprop",
@@ -101,10 +100,10 @@ class ThreeStageNetwork():
         Inputs:
             num_classes int: Number of Classes (for Classifier purely)
             embedding_size int: The size of embedding space output from Embedder
-            efficientnet_version str: Which efficientnet model to use for Trunk
-            trunk_optim optim: Which optimizer to use, such as AdamW
-            embedder_optim optim: Which optimizer to use, such as AdamW
-            classifier_optim optim: Which optimizer to use, such as AdamW
+            trunk_architecture str: To pass to self.get_trunk() either efficientnet-b{i} or resnet-18/50 or mobilenet
+            trunk_optim optim: Which optimizer to use, such as adamW
+            embedder_optim optim: Which optimizer to use, such as adamW
+            classifier_optim optim: Which optimizer to use, such as adamW
             trunk_lr float: The learning rate for the Trunk Optimizer
             embedder_lr float: The learning rate for the Embedder Optimizer
             classifier_lr float: The learning rate for the Classifier Optimizer
@@ -112,6 +111,8 @@ class ThreeStageNetwork():
             trunk_decay float: The multiplier for the Scheduler y_{t+1} <- trunk_decay * y_{t}
             embedder_decay float: The multiplier for the Scheduler y_{t+1} <- embedder_decay * y_{t}
             classifier_decay float: The multiplier for the Scheduler y_{t+1} <- classifier_decay * y_{t}
+            log_train Bool: whether or not to save training logs
+            gpu_id Int: Only currently used to track the GPU useage
         """
 
         self.gpu_id = gpu_id
@@ -123,18 +124,15 @@ class ThreeStageNetwork():
         # build three stage network
         self.num_classes = num_classes
         self.embedding_size = embedding_size
-        self.efficientnet_version = efficientnet_version
-        self.trunk = EfficientNet.from_pretrained(efficientnet_version, num_classes=2048)
-        self.model_output_size = self.trunk._fc.in_features
-        self.trunk._fc = torch.nn.Identity()
+        self.MLP_neurons = 1024 # output size of neural network + size used inside embedder/classifier MLP
+
+        self.get_trunk(trunk_architecture)
+        #self.trunk._fc = torch.nn.Identity()
         self.trunk = nn.DataParallel(self.trunk.to(self.device))
-        self.embedder = nn.DataParallel(Network([self.model_output_size, self.embedding_size]).to(self.device))
-        self.classifier = nn.DataParallel(Network([self.embedding_size, self.num_classes]).to(self.device))
+        self.embedder = nn.DataParallel(Network([self.MLP_neurons, self.embedding_size], self.MLP_neurons).to(self.device))
+        self.classifier = nn.DataParallel(Network([self.embedding_size, self.num_classes], self.MLP_neurons).to(self.device))
 
         # build optimizers
-        # self.trunk_optimizer = trunk_optim(self.trunk.parameters(), lr=trunk_lr, weight_decay=weight_decay)
-        # self.embedder_optimizer = embedder_optim(self.embedder.parameters(), lr=embedder_lr, weight_decay=weight_decay)
-        # self.classifier_optimizer = classifier_optim(self.classifier.parameters(), lr=classifier_lr, weight_decay=weight_decay)
         self.trunk_optimizer = self.get_optimizer(trunk_optim, 
                                                   self.trunk.parameters(), 
                                                   lr=trunk_lr, 
@@ -159,17 +157,18 @@ class ThreeStageNetwork():
         self.miner = miners.MultiSimilarityMiner(epsilon=0.1)
         # build proxy anchor loss
         self.proxy_anchor = Proxy_Anchor(nb_classes = num_classes, sz_embed = embedding_size, mrg = 0.2, alpha = 32).to(self.device)
-        self.proxy_optimizer = AdamW(self.proxy_anchor.parameters(), lr=trunk_lr*100, weight_decay=1.5E-6)
+        self.proxy_optimizer = AdamW(self.proxy_anchor.parameters(), lr=trunk_lr*10, weight_decay=1.5E-6)
         self.proxy_scheduler = ExponentialLR(self.proxy_optimizer, gamma=0.8)
         # finally crossentropy loss
         self.crossentropy = torch.nn.CrossEntropyLoss().to(self.device)
 
         # log some of this information
-        self.model_params = {"Trunk_Model":self.efficientnet_version,
+        self.model_params = {"Trunk_Model":trunk_architecture,
                              "Optimizers":[str(self.trunk_optimizer),
                                            str(self.embedder_optimizer),
                                            str(self.classifier_optimizer)],
                              "Embedder":str(self.embedder),
+                             "Embedding_Dimension":str(embedding_size),
                              "Weight_Decay":weight_decay,
                              "Scheduler_Decays":[trunk_decay, embedder_decay, classifier_decay],
                              "Embedding_Size":embedding_size,
@@ -185,6 +184,27 @@ class ThreeStageNetwork():
             return torch.optim.SGD(params, lr=lr, momentum=0.9, weight_decay=weight_decay, nesterov=True)
         elif optim == "RMSprop":
             return torch.optim.RMSprop(params, lr=lr, weight_decay=weight_decay)
+        else:
+            return None
+
+    def get_trunk(self, architecture):
+
+        if "efficientnet" in architecture.lower():
+            self.trunk = EfficientNet.from_pretrained(architecture, num_classes=self.MLP_neurons)
+
+        elif "resnet" in architecture.lower():
+            if "18" in architecture.lower():
+                self.trunk = models.resnet18(pretrained=True)
+                self.trunk.fc = nn.Linear(512, self.MLP_neurons)
+
+            elif "50" in architecture.lower():
+                self.trunk = models.resnext50_32x4d(pretrained=True)
+                self.trunk.fc = nn.Linear(2048, self.MLP_neurons)
+
+        elif "mobilenet" in architecture.lower():
+            self.trunk = models.mobilenet_v2(pretrained=True)
+            self.trunk.classifier[1] = torch.nn.Linear(1280, self.MLP_neurons)
+
 
 
     def get_embeddings_logits(self, dataset, indices, batch_size=128, num_workers=16):
@@ -207,7 +227,8 @@ class ThreeStageNetwork():
         # turn all models into eval mode
         self.trunk.eval()
         self.embedder.eval()
-        self.classifier.eval()
+        if self.classifier_optimizer is not None:
+            self.classifier.eval()
 
         n_iter = int(temp_loader.sampler.__len__()/batch_size)
         # turn grad off for evaluation
@@ -295,7 +316,7 @@ class ThreeStageNetwork():
                 }, path + "/models.h5")
 
 
-    def load_weights(self, path, load_trunk=True, load_embedder=True, load_classifier=True):
+    def load_weights(self, path, load_trunk=True, load_embedder=True, load_classifier=True, load_optimizers=True):
         """
         This function is to continue training or to use a pretrained model,
         it will load a file saved from the save_model() method above at the
@@ -309,21 +330,73 @@ class ThreeStageNetwork():
 
         if load_trunk:
             self.trunk.load_state_dict(weights["trunk_state_dict"])
-            self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
+            if load_optimizers:
+              self.trunk_optimizer.load_state_dict(weights["trunk_optimizer_state_dict"])
             loaded.append("Trunk")
 
         if load_embedder:
             self.embedder.load_state_dict(weights["embedder_state_dict"])
-            self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
+            if load_optimizers:
+              self.embedder_optimizer.load_state_dict(weights["embedder_optimizer_state_dict"])
             loaded.append("Embedder")
 
         if load_classifier:
             self.classifier.load_state_dict(weights["classifier_state_dict"])
-            self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
+            if load_optimizers:
+              self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
             loaded.append("Classifier")
 
         print("Loaded pretrained weights for", path, "for", loaded)
 
+
+    def augmented_embeds(self, image, N):
+        # TEMPORARY METHOD WILL BE REMOVED AS IT ISN'T USEFUL RIGHT NOW
+        """
+        Pass PIL Image and get back N augmented versions of the image,
+        as well as the original
+        """
+
+        # setup the augmentation, this code should change, pretty ugly!
+        transform = transforms.Compose([transforms.Resize(224),
+                                transforms.CenterCrop(224),
+                                transforms.RandomHorizontalFlip(p=0.5),
+                                transforms.ColorJitter(brightness=(0.8, 1.3),
+                                        contrast=(0.8, 1.2),
+                                        saturation=(0.9, 1.2),
+                                        hue=(-0.05, 0.05)),
+                                transforms.RandomRotation(degrees=(-5, 5),
+                                            expand=True),
+                                transforms.CenterCrop(224),
+                                transforms.ToTensor(),
+                                transforms.Normalize([0.485, 0.456, 0.406],
+                                                      [0.229, 0.224, 0.225])])
+
+        val_transform = transforms.Compose([transforms.Resize(224),
+                                            transforms.CenterCrop(224),
+                                            transforms.ToTensor(),
+                                            transforms.Normalize([0.485, 0.456, 0.406],
+                                                                [0.229, 0.224, 0.225])])
+
+        # augment the image N times and return
+        self.trunk.eval()
+        self.embedder.eval()
+
+        tot_embeds = []
+        with torch.no_grad():
+
+            # get original image with val transform
+            fc_out = self.trunk(val_transform(image).to(self.device).reshape(1, 3, 224, 224))
+            embeds = self.embedder(fc_out)
+            tot_embeds.append(embeds.squeeze())
+
+            # now get N augmented images
+            for _ in range(N):
+                fc_out = self.trunk(transform(image).to(self.device).reshape(1, 3, 224, 224))
+                embeds = self.embedder(fc_out)
+                tot_embeds.append(embeds.squeeze())
+
+        return torch.stack(tot_embeds)
+        
 
     def setup_data(self,
                    dataset,
@@ -364,10 +437,6 @@ class ThreeStageNetwork():
         if load_indices:
             arr = np.load(indices_path)
             train_indices, val_indices, holdout_indices = arr["train"], arr["val"], arr["holdout"]
-            print(train_indices)
-            print(arr["train"])
-            print(indices_path)
-
         else:
             if self.pretrained is True:
                 warnings.warn("Picking random indices, dangerous if you are continuing training!")
@@ -379,7 +448,7 @@ class ThreeStageNetwork():
 
         augmentations = data_augmentation(hflip=True,
                                           crop=False,
-                                          colorjitter=False,
+                                          colorjitter=True,
                                           rotations=False,
                                           affine=False,
                                           imagenet=True)
@@ -409,7 +478,12 @@ class ThreeStageNetwork():
               loss_ratios=[1,1,1,3],
               model_save_path="models",
               model_name="models.h5",
-              epoch_embeddings=True):
+              epoch_train=False,
+              epoch_val=True,
+              epoch_save=False,
+              save_trunk=True,
+              save_embedder=True,
+              save_classifier=True):
         """
         This method is used for actually training the model, it is meant
         to be called after the setup_data() method and won't function
@@ -456,6 +530,9 @@ class ThreeStageNetwork():
         # This is purely used for model checkpoints to save the best epoch model
         best_val_accuracy = 0
 
+        # setup AMP GradScaler
+        scaler = torch.cuda.amp.GradScaler()
+
         print(f"Starting training with {n_epochs} Epochs.")
         n_iters = np.int(self.trainloader.sampler.__len__() / self.batch_size)
         for epoch in range(n_epochs):
@@ -495,48 +572,60 @@ class ThreeStageNetwork():
                     self.classifier.zero_grad()
 
                     # forward pass
-                    time_check = time()
-                    fc_out = self.trunk(inputs)
-                    embeddings = self.embedder(fc_out)
-                    logits = self.classifier(embeddings)
-                    performance_dict["Forward_Pass"] += time() - time_check
+                    with autocast():
+                        time_check = time()
+                        fc_out = self.trunk(inputs)
+                        embeddings = self.embedder(fc_out)
+                        logits = self.classifier(embeddings)
+                        performance_dict["Forward_Pass"] += time() - time_check
 
-                    # mine interesting pairs
-                    time_check = time()
-                    if loss_ratios[0] + loss_ratios[1] != 0:
-                        hard_pairs = self.miner(embeddings, labels)
-                    performance_dict["Mining"] += time() - time_check
+                        # mine interesting pairs
+                        time_check = time()
+                        if loss_ratios[0] + loss_ratios[1] != 0:
+                            hard_pairs = self.miner(embeddings, labels)
+                        performance_dict["Mining"] += time() - time_check
 
-                    # compute loss, the conditionals are to speed up compute if a loss
-                    # has been switched off.
-                    time_check = time()
-                    loss = 0
-                    curr_losses = []
-                    if loss_ratios[0] != 0:
-                        triplet_loss_curr = self.triplet(embeddings, labels, hard_pairs)
-                        curr_losses.append(triplet_loss_curr.item() * loss_ratios[0])
-                        loss += triplet_loss_curr * loss_ratios[0]
-                    if loss_ratios[1] != 0:
-                        ms_loss_curr = self.multisimilarity(embeddings, labels, hard_pairs)
-                        curr_losses.append(ms_loss_curr.item() * loss_ratios[1])
-                        loss += ms_loss_curr * loss_ratios[1]
-                    if loss_ratios[2] != 0:
-                        proxy_loss_curr = self.proxy_anchor(embeddings, labels)
-                        curr_losses.append(proxy_loss_curr.item() * loss_ratios[2])
-                        loss += proxy_loss_curr * loss_ratios[2]
-                    if loss_ratios[3] != 0:
-                        cse_loss_curr = self.crossentropy(logits, labels.to(self.device).long())
-                        curr_losses.append(cse_loss_curr.item() * loss_ratios[3])
-                        loss += cse_loss_curr * loss_ratios[3]
-                    loss.backward()
+                        # compute loss, the conditionals are to speed up compute if a loss
+                        # has been switched off.
+                        time_check = time()
+                        loss = 0
+                        curr_losses = []
+                        if loss_ratios[0] != 0:
+                            triplet_loss_curr = self.triplet(embeddings, labels, hard_pairs)
+                            curr_losses.append(triplet_loss_curr.item() * loss_ratios[0])
+                            loss += triplet_loss_curr * loss_ratios[0]
+
+                        if loss_ratios[1] != 0:
+                            ms_loss_curr = self.multisimilarity(embeddings, labels, hard_pairs)
+                            curr_losses.append(ms_loss_curr.item() * loss_ratios[1])
+                            loss += ms_loss_curr * loss_ratios[1]
+
+                        if loss_ratios[2] != 0:
+                            proxy_loss_curr = self.proxy_anchor(embeddings, labels)
+                            curr_losses.append(proxy_loss_curr.item() * loss_ratios[2])
+                            loss += proxy_loss_curr * loss_ratios[2]
+
+                        if loss_ratios[3] != 0:
+                            cse_loss_curr = self.crossentropy(logits, labels.to(self.device).long())
+                            curr_losses.append(cse_loss_curr.item() * loss_ratios[3])
+                            loss += cse_loss_curr * loss_ratios[3]
+
+                    scaler.scale(loss).backward()
                     performance_dict["Compute_Loss"] += time() - time_check
 
                     # now take a step
                     time_check = time()
-                    self.trunk_optimizer.step()
-                    self.embedder_optimizer.step()
-                    self.classifier_optimizer.step()
-                    self.proxy_optimizer.step()
+                    scaler.step(self.trunk_optimizer)
+                    scaler.step(self.embedder_optimizer)
+                    scaler.step(self.classifier_optimizer)
+                    scaler.step(self.proxy_optimizer)
+
+                    scaler.update()
+
+                    # self.trunk_optimizer.step()
+                    # self.embedder_optimizer.step()
+                    # self.classifier_optimizer.step()
+                    # self.proxy_optimizer.step()
                     performance_dict["Optim_Step"] += time() - time_check
 
                     time_check = time()
@@ -590,7 +679,7 @@ class ThreeStageNetwork():
                     json.dump(performance_dict, json_file)
             print(performance_dict)
 
-            if epoch_embeddings is True:
+            if epoch_train is True:
                 # Train accuracy, embeddings and potential UMAP
                 print("Training")
                 em, lo, la, train_accuracy = self.get_embeddings_logits(self.val_dataset,
@@ -598,6 +687,7 @@ class ThreeStageNetwork():
                                                                         self.batch_size*2,
                                                                         self.num_workers)
 
+            if epoch_val is True:
                 # Validation accuracy, loss, embeddings and potential UMAP
                 print("Validation")
                 em, lo, la, val_accuracy = self.get_embeddings_logits(self.val_dataset,
@@ -612,11 +702,16 @@ class ThreeStageNetwork():
             # finally we log the batch metrics
             if self.log_train:
                 self.epoch_history["Learning_Rates"].append([self.trunk_scheduler.get_last_lr(),
-                                                        self.embedder_scheduler.get_last_lr(),
-                                                        self.classifier_scheduler.get_last_lr()])
+                                                             self.embedder_scheduler.get_last_lr(),
+                                                             self.classifier_scheduler.get_last_lr()])
                 self.epoch_history["Epoch"].append(epoch)
-                self.epoch_history["Train_Accuracy"].append(train_accuracy)
-                self.epoch_history["Val_Accuracy"].append(val_accuracy)
+                if epoch_train:
+                    self.epoch_history["Train_Accuracy"].append(train_accuracy)
+                else:
+                    train_accuracy = 0
+                if epoch_val:
+                    self.epoch_history["Val_Accuracy"].append(val_accuracy)
+
                 self.epoch_history["Time"].append(datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
 
                 # write CSV file
@@ -637,18 +732,22 @@ class ThreeStageNetwork():
             self.proxy_scheduler.step()
 
             # save best model (based on validation accuracy)
-            if val_accuracy >= best_val_accuracy:
+            if val_accuracy >= best_val_accuracy or epoch_save is True:
                 best_val_accuracy = val_accuracy
                 # WARNING!!!! This MIGHT not work if parallel GPUs are used, then would
                 # need to use model.module.state_dict() I believe? Not sure!
-                torch.save({
-                    "trunk_state_dict": self.trunk.state_dict(),
-                    "embedder_state_dict": self.embedder.state_dict(),
-                    "classifier_state_dict": self.classifier.state_dict(),
-                    "trunk_optimizer_state_dict": self.trunk_optimizer.state_dict(),
-                    "embedder_optimizer_state_dict": self.embedder_optimizer.state_dict(),
-                    "classifier_optimizer_state_dict": self.classifier_optimizer.state_dict(),
-                    }, model_save_path + "/" + model_name)
+                save_dict = {}
+                if save_trunk:
+                    save_dict["trunk_state_dict"] = self.trunk.state_dict()
+                    save_dict["trunk_optimizer_state_dict"] = self.trunk_optimizer.state_dict()
+                if save_embedder:
+                    save_dict["embedder_state_dict"] = self.embedder.state_dict()
+                    save_dict["embedder_optimizer_state_dict"] = self.embedder_optimizer.state_dict()
+                if save_classifier:
+                    save_dict["classifier_state_dict"] = self.classifier.state_dict()
+                    save_dict["classifier_optimizer_state_dict"] = self.classifier_optimizer.state_dict()
+
+                torch.save({save_dict}, model_save_path + "/" + model_name)
 
                 # save the JSON including model details, this can be improved to take the mean
                 self.model_params["final_val_accuracy"] = best_val_accuracy

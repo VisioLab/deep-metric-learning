@@ -94,11 +94,10 @@ class CustomSampler(torch.utils.data.Sampler):
         
         print("Running Sampler")
         for i in range(0, self.list_size, self.M):
-            # pick a random label, for now use a while loop in case
-            # the label has 0 entries.=
+            # pick a random label from the list of labels with > 0 items
             label = np.random.choice(self.valid_labels)
            
-            # now pick M random indices from that label
+            # now pick M random indices from that label and add to iter_list
             iter_list[i:i+self.M] = np.random.choice(self.label_indices[label],
                                                      size=self.M,
                                                      replace=len(self.label_indices[label]) < self.M)
@@ -119,27 +118,28 @@ def data_augmentation(hflip=True,
     This function is very experimental
     """
 
-    augments = []
+    augments = [transforms.Resize(224)]
     if hflip:
         augments.append(transforms.RandomHorizontalFlip(p=0.5))
     if crop:
-        augments.append(transforms.RandomResizedCrop(scale=(0.1, 1),
-                                                    ratio=(0.75, 1.33),
+        augments.append(transforms.RandomResizedCrop(scale=(0.6, 1),
                                                     size=224))
     if colorjitter:
-        augments.append(transforms.ColorJitter(brightness=0.3,
-                                        contrast=0.2,
-                                        saturation=0.2,
-                                        hue=0.3))
+        augments.append(transforms.ColorJitter(brightness=(0.8, 1.3),
+                                        contrast=(0.8, 1.2),
+                                        saturation=(0.9, 1.2),
+                                        hue=(-0.05, 0.05)))
     if rotations:
         augments.append(transforms.RandomRotation(degrees=(-5, 5),
                                             expand=True))
-        augments.append(transforms.Resize(224))
+        augments.append(transforms.CenterCrop(224))
     if affine:
         augments.append(transforms.RandomAffine(degrees=5))
 
     if imagenet:
         augments.append(ImageNetPolicy())
+    else:
+        augments.append(transforms.CenterCrop(224))
 
     return augments
 
@@ -148,7 +148,7 @@ def get_train_val_holdout_indices(labels, train_labels=None, train_split=0.8):
 
     # labels to train on, rest will be in holdout set, if none given select all classes
     if train_labels is None:
-        train_labels = np.arange(101)
+        train_labels = np.arange(len(np.unique(labels)))
 
     t_label_ids = []
     for i in train_labels:
@@ -181,8 +181,7 @@ def get_dataloaders(dataset,
     for the train set and returns necessary information.
     """
 
-    transformations = [transforms.Resize(224),
-                       transforms.CenterCrop(224),
+    transformations = [transforms.CenterCrop(224),
                        transforms.ToTensor(),
                        transforms.Normalize([0.485, 0.456, 0.406],
                                             [0.229, 0.224, 0.225])]
