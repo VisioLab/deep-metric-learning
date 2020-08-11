@@ -747,7 +747,7 @@ class ThreeStageNetwork():
                     save_dict["classifier_state_dict"] = self.classifier.state_dict()
                     save_dict["classifier_optimizer_state_dict"] = self.classifier_optimizer.state_dict()
 
-                torch.save({save_dict}, model_save_path + "/" + model_name)
+                torch.save(save_dict, model_save_path + "/" + model_name)
 
                 # save the JSON including model details, this can be improved to take the mean
                 self.model_params["final_val_accuracy"] = best_val_accuracy

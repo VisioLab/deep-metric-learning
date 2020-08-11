@@ -40,7 +40,7 @@ class FoodData(torch.utils.data.Dataset):
 
 class CustomSampler(torch.utils.data.Sampler):
 
-    def __init__(self, M, indices, labels):
+    def __init__(self, M, indices, labels, batch_size):
         """
         this is a custom sampler to try to extend Kevins sampler.
         Change from: https://github.com/KevinMusgrave/pytorch-metric-learning
@@ -55,7 +55,10 @@ class CustomSampler(torch.utils.data.Sampler):
         if self.M*self.unique_labels.shape[0] < self.list_size:
             self.list_size -= (self.list_size) % (self.M*self.unique_labels.shape[0])
 
+        # valid classes (classes that have items in them)
         self.valid_labels = np.unique(labels[indices])
+        # whether or not to replace labels when picking classes
+        self.replace_labels = len(self.valid_labels) < batch_size/self.M
 
     def get_label_indices(self, labels):
         """
@@ -91,16 +94,17 @@ class CustomSampler(torch.utils.data.Sampler):
     def __iter__(self):
 
         iter_list = [0]*self.list_size
+
+        # pick labels we will use (we need batch_size / M classes)
+        labels = np.random.choice(self.valid_labels, 
+                                  size=int(np.ceil(self.list_size/self.M)),
+                                  replace=self.replace_labels)
         
-        print("Running Sampler")
         for i in range(0, self.list_size, self.M):
-            # pick a random label from the list of labels with > 0 items
-            label = np.random.choice(self.valid_labels)
-           
             # now pick M random indices from that label and add to iter_list
-            iter_list[i:i+self.M] = np.random.choice(self.label_indices[label],
+            iter_list[i:i+self.M] = np.random.choice(self.label_indices[labels[i]],
                                                      size=self.M,
-                                                     replace=len(self.label_indices[label]) < self.M)
+                                                     replace=len(self.label_indices[labels[i]]) < self.M)
         return iter(iter_list)
 
     def __len__(self):

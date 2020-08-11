@@ -160,3 +160,33 @@ def torch_get_top_k(bins, k=3):
     if len(bins) < k:
         k = len(bins)
     return torch.topk(bins, k=k).indices
+
+
+def knn_sim(embeddings, labels, k=3, local_normalization=True):
+    """
+    Simulates kNN for every embedding. Basically operates under the principle
+    that when we compute the pairwise distance we are computing the distance
+    from the diagonal index to every other embedding. Therefore we can use
+    the diagonal indices as our "samples" and are "running" kNN on the remainder.
+    """
+
+    # precompute some required values, also looks cleaner
+    batch_size = labels.shape[0]
+    num_classes = labels.max().item() + 1
+
+    # get the K nearest values distance weighted (basically torch.bincount with weighting)
+    ans = torch.cdist(embeddings, embeddings) # get pairwise distance matrix to simulate kNN
+    torch.diagonal(ans).fill_(float("Inf")) # so that we don't select that value
+    dist, nearest = torch.topk(ans, k = k, largest=False) # get k closest to each value
+    x = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
+    x = x.scatter_add(1, labels[nearest], dist.reciprocal()) # compute the bincount with reciprocal distance
+    x = Variable(x.data, requires_grad=True)
+
+    if local_normalization:
+        # local normalization with smooth coefficient 1E-4
+        x2 = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
+        x2 = x2.scatter_add(1, labels[nearest], torch.ones([batch_size, k]).cuda())
+        x = (x + 1e-4) / (x2 + 1) # divide local reciprocal distance sums by number of local occurances
+
+    #preds = torch.argmax(x, dim=1) # predictions for each value
+    return x
