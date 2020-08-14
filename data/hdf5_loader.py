@@ -40,16 +40,18 @@ class FoodData(torch.utils.data.Dataset):
 
 class CustomSampler(torch.utils.data.Sampler):
 
-    def __init__(self, M, indices, labels, batch_size):
+    def __init__(self, M, indices, labels, batch_size, class_weights=None):
         """
         this is a custom sampler to try to extend Kevins sampler.
         Change from: https://github.com/KevinMusgrave/pytorch-metric-learning
         """
         self.indices = indices
         self.labels = labels
+        self.batch_size = batch_size
         self.M = M
         self.unique_labels = np.unique(labels)
         self.label_indices = self.get_label_indices(labels)
+        self.class_weights = class_weights
 
         self.list_size = len(indices)
         if self.M*self.unique_labels.shape[0] < self.list_size:
@@ -58,7 +60,14 @@ class CustomSampler(torch.utils.data.Sampler):
         # valid classes (classes that have items in them)
         self.valid_labels = np.unique(labels[indices])
         # whether or not to replace labels when picking classes
-        self.replace_labels = len(self.valid_labels) < batch_size/self.M
+        self.replace_labels = len(self.valid_labels) < int(np.ceil(self.list_size/self.M))
+
+        # if no weights given start uniform
+        if self.class_weights is None:
+            self.class_weights = np.ones(len(self.valid_labels)) / len(self.valid_labels)
+        else:
+            # normalize to equal to 1
+            self.class_weights /= np.sum(self.class_weights)
 
     def get_label_indices(self, labels):
         """
@@ -96,15 +105,27 @@ class CustomSampler(torch.utils.data.Sampler):
         iter_list = [0]*self.list_size
 
         # pick labels we will use (we need batch_size / M classes)
-        labels = np.random.choice(self.valid_labels, 
-                                  size=int(np.ceil(self.list_size/self.M)),
-                                  replace=self.replace_labels)
+        # labels = np.random.choice(self.valid_labels, 
+        #                           size=int(np.ceil(self.list_size/self.M))+1,
+        #                           replace=self.replace_labels,
+        #                           p=self.class_weights)
+
+        print(self.class_weights)
+
+        num_batches = int(np.ceil(self.list_size/self.batch_size))
+        labels = []
+        for _ in range(num_batches):
+            labels.append(np.random.choice(self.valid_labels,
+                                           size=int(np.ceil(self.batch_size/self.M)),
+                                           replace=len(self.valid_labels) < int(np.ceil(self.batch_size/self.M)),
+                                           p=self.class_weights))
+        labels = np.hstack(labels)
         
         for i in range(0, self.list_size, self.M):
             # now pick M random indices from that label and add to iter_list
-            iter_list[i:i+self.M] = np.random.choice(self.label_indices[labels[i]],
+            iter_list[i:i+self.M] = np.random.choice(self.label_indices[labels[i//self.M]],
                                                      size=self.M,
-                                                     replace=len(self.label_indices[labels[i]]) < self.M)
+                                                     replace=len(self.label_indices[labels[i//self.M]]) < self.M)
         return iter(iter_list)
 
     def __len__(self):
@@ -179,7 +200,8 @@ def get_dataloaders(dataset,
                     M=3,
                     labels=None,
                     train_labels=None,
-                    train_indices=None):
+                    train_indices=None,
+                    class_weights=None):
     """
     This function loads the h5 file and instantiates a FoodData object, it then builds dataloaders
     for the train set and returns necessary information.
@@ -211,7 +233,9 @@ def get_dataloaders(dataset,
     # initialize our samplers with the selected indices
     sampler = CustomSampler(M=M,
                             indices=train_indices,
-                            labels=labels)
+                            labels=labels,
+                            batch_size=batch_size,
+                            class_weights=class_weights)
 
     # now build the dataloaders with the selected samplers
     trainloader = DataLoader(

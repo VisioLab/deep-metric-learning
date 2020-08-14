@@ -20,7 +20,7 @@ class TorchKNN():
         self.dimension = dimension
         self.cells_allocate = cells_allocate
         self.verbose = verbose
-        self.device = torch.device("gpu") if torch.cuda.is_available() else torch.device("cpu")
+        self.device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
 
         # pre-allocate some cells for more efficient addition of future data
         if self.verbose >= 1:
@@ -162,7 +162,7 @@ def torch_get_top_k(bins, k=3):
     return torch.topk(bins, k=k).indices
 
 
-def knn_sim(embeddings, labels, k=3, local_normalization=True):
+def knn_sim(embeddings, labels, k=3, distance_weighted=True, local_normalization=True, num_classes=None):
     """
     Simulates kNN for every embedding. Basically operates under the principle
     that when we compute the pairwise distance we are computing the distance
@@ -172,21 +172,51 @@ def knn_sim(embeddings, labels, k=3, local_normalization=True):
 
     # precompute some required values, also looks cleaner
     batch_size = labels.shape[0]
-    num_classes = labels.max().item() + 1
+    if num_classes is None:
+        num_classes = labels.max().item() + 1
 
     # get the K nearest values distance weighted (basically torch.bincount with weighting)
     ans = torch.cdist(embeddings, embeddings) # get pairwise distance matrix to simulate kNN
     torch.diagonal(ans).fill_(float("Inf")) # so that we don't select that value
     dist, nearest = torch.topk(ans, k = k, largest=False) # get k closest to each value
-    x = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
-    x = x.scatter_add(1, labels[nearest], dist.reciprocal()) # compute the bincount with reciprocal distance
-    x = Variable(x.data, requires_grad=True)
+    if distance_weighted:
+        x = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
+        x = x.scatter_add(1, labels[nearest], dist.reciprocal()) # compute the bincount with reciprocal distance
+    else:
+        # if no distance weighting then simply return the bincount, basic kNN rule of local majority
+        x = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
+        x = x.scatter_add(1, labels[nearest], torch.ones([batch_size, k]).cuda()) # compute the bincount with reciprocal distance
 
-    if local_normalization:
+    # can't locally normalize without distance weighting, doesn't make sense.
+    if local_normalization is True and distance_weighted is True:
         # local normalization with smooth coefficient 1E-4
         x2 = torch.zeros([batch_size, num_classes]).cuda() # prepare a hacky way to implement bincount for multiD
         x2 = x2.scatter_add(1, labels[nearest], torch.ones([batch_size, k]).cuda())
         x = (x + 1e-4) / (x2 + 1) # divide local reciprocal distance sums by number of local occurances
 
-    #preds = torch.argmax(x, dim=1) # predictions for each value
+    return x
+
+
+def get_weights(preds, labels):
+    report = classification_report(preds.cpu().numpy(), labels.cpu().numpy(), output_dict=True)
+    f1_scores = [report[key]["f1-score"] for key in list(report.keys())[:-3]]
+    weights = torch.from_numpy(np.array(f1_scores) + 0.05).reciprocal()
+    weights /= torch.sum(weights)
+    return weights.numpy(), np.array([int(i) for i in list(report.keys())[:-3]])
+
+
+def impostor_weights(preds, labels, k, num_classes):
+
+    # dark wizardry to extract Nth column (labels) of each prediction
+    index = torch.stack([torch.zeros(len(labels), dtype=torch.int32).cuda(), labels]).T
+
+    # number of positive neighbors per class and impostors
+    num_positives = preds.gather(dim=1, 
+                                 index=index)[:,1]
+    num_impostors = torch.abs(num_positives - k)
+
+    # count number of impostors per label
+    x = torch.zeros(num_classes).cuda()
+    x = x.scatter_add(0, labels, num_impostors)
+
     return x
