@@ -40,11 +40,12 @@ class FoodData(torch.utils.data.Dataset):
 
 class CustomSampler(torch.utils.data.Sampler):
 
-    def __init__(self, M, indices, labels, batch_size, class_weights=None):
+    def __init__(self, M, indices, labels, batch_size, class_weights=None, max_batches=None):
         """
         this is a custom sampler to try to extend Kevins sampler.
         Change from: https://github.com/KevinMusgrave/pytorch-metric-learning
         """
+        self.max_batches = max_batches
         self.indices = indices
         self.labels = labels
         self.batch_size = batch_size
@@ -55,13 +56,14 @@ class CustomSampler(torch.utils.data.Sampler):
 
         self.list_size = len(indices)
         if self.M*self.unique_labels.shape[0] < self.list_size:
-            self.list_size -= (self.list_size) % (self.M*self.unique_labels.shape[0])
+            self.list_size -= (self.list_size) % (self.M)
 
         # valid classes (classes that have items in them)
         self.valid_labels = np.unique(labels[indices])
         # whether or not to replace labels when picking classes
         self.replace_labels = len(self.valid_labels) < int(np.ceil(self.list_size/self.M))
 
+        print("Total collisions", np.sum(self.class_weights))
         # if no weights given start uniform
         if self.class_weights is None:
             self.class_weights = np.ones(len(self.valid_labels)) / len(self.valid_labels)
@@ -110,8 +112,6 @@ class CustomSampler(torch.utils.data.Sampler):
         #                           replace=self.replace_labels,
         #                           p=self.class_weights)
 
-        print(self.class_weights)
-
         num_batches = int(np.ceil(self.list_size/self.batch_size))
         labels = []
         for _ in range(num_batches):
@@ -126,10 +126,13 @@ class CustomSampler(torch.utils.data.Sampler):
             iter_list[i:i+self.M] = np.random.choice(self.label_indices[labels[i//self.M]],
                                                      size=self.M,
                                                      replace=len(self.label_indices[labels[i//self.M]]) < self.M)
-        return iter(iter_list)
+        return iter(iter_list[:int(self.max_batches*self.batch_size)])
 
     def __len__(self):
-        return self.list_size
+        if int(self.max_batches*self.batch_size) < self.list_size:
+            return int(self.max_batches*self.batch_size)
+        else:
+            return self.list_size
 
 
 def data_augmentation(hflip=True,
@@ -144,26 +147,27 @@ def data_augmentation(hflip=True,
     """
 
     augments = [transforms.Resize(224)]
+
     if hflip:
         augments.append(transforms.RandomHorizontalFlip(p=0.5))
-    if crop:
-        augments.append(transforms.RandomResizedCrop(scale=(0.6, 1),
-                                                    size=224))
+    
     if colorjitter:
         augments.append(transforms.ColorJitter(brightness=(0.8, 1.3),
-                                        contrast=(0.8, 1.2),
-                                        saturation=(0.9, 1.2),
-                                        hue=(-0.05, 0.05)))
+                                               contrast=(0.8, 1.2),
+                                               saturation=(0.9, 1.2),
+                                               hue=(-0.05, 0.05)))
     if rotations:
-        augments.append(transforms.RandomRotation(degrees=(-5, 5),
-                                            expand=True))
-        augments.append(transforms.CenterCrop(224))
+        augments.append(transforms.RandomRotation(degrees=(-15, 15),
+                                                  expand=True))
+        augments.append(transforms.CenterCrop(192))
     if affine:
         augments.append(transforms.RandomAffine(degrees=5))
-
+    if crop:
+        augments.append(transforms.RandomResizedCrop(scale=(0.6, 1),
+                                                     size=224))
     if imagenet:
         augments.append(ImageNetPolicy())
-    else:
+    if rotations is False and imagenet is False:
         augments.append(transforms.CenterCrop(224))
 
     return augments
@@ -201,11 +205,15 @@ def get_dataloaders(dataset,
                     labels=None,
                     train_labels=None,
                     train_indices=None,
-                    class_weights=None):
+                    class_weights=None,
+                    max_batches=None):
     """
     This function loads the h5 file and instantiates a FoodData object, it then builds dataloaders
     for the train set and returns necessary information.
     """
+
+    if max_batches is None:
+        max_batches = 100_000
 
     transformations = [transforms.CenterCrop(224),
                        transforms.ToTensor(),
@@ -235,7 +243,8 @@ def get_dataloaders(dataset,
                             indices=train_indices,
                             labels=labels,
                             batch_size=batch_size,
-                            class_weights=class_weights)
+                            class_weights=class_weights,
+                            max_batches=max_batches)
 
     # now build the dataloaders with the selected samplers
     trainloader = DataLoader(

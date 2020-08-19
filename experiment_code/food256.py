@@ -40,7 +40,7 @@ if __name__ == '__main__':
     prepare_experiment()
 
 
-    path = "larger_data/"
+    path = "UECFOOD256/"
     directories = os.listdir(path)
 
     image_paths = []
@@ -56,8 +56,7 @@ if __name__ == '__main__':
                     image_paths.append(path + directory + "/" + im)
                     categories.append(directory)
                 except:
-                    os.remove(path + directory + "/" + im)
-
+                    pass
 
     # now make encoded labels
     le = LabelEncoder()
@@ -81,21 +80,22 @@ if __name__ == '__main__':
                               classifier_decay=0.95,
                               log_train=True)
 
-    #model.load_weights("models/models.h5", load_classifier=True, load_optimizers=False)
+    model.load_weights("models/models.h5", load_classifier=False, load_optimizers=False)
     model.setup_data(dataset=NewData,
-                     batch_size=1024,
-                     load_indices=False,
+                     batch_size=256,
+                     load_indices=True,
                      num_workers=8,
-                     M=4,
+                     M=8,
                      labels=labels,
                      indices_path="logs/data_indices.npz",
-                     train_split=0.95)
+                     train_split=0.90,
+                     max_batches=200)
 
     print(len(model.labels))
     print(len(np.unique(model.labels)))
     print(len(model.train_indices))
-    model.train(n_epochs=25,
-                loss_ratios=[10,5,0.2,5],
+    model.train(n_epochs=100,
+                loss_ratios=[1,5,1,5],
                 class_weighting=False,
                 epoch_train=False,
                 epoch_val=True)
@@ -108,7 +108,7 @@ if __name__ == '__main__':
 
     # finish experiment and zip up
     experiment_id = zip_files(["models", "logs"],
-                              experiment_id="b0_593_new")
+                              experiment_id="efficientnet_food256")
     upload_to_s3(file_name=f"experiment_{experiment_id}.zip",
                  destination=None,
                  bucket="msc-thesis")

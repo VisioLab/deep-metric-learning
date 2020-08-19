@@ -39,25 +39,36 @@ if __name__ == '__main__':
     # prepare the experiment
     prepare_experiment()
 
+    # for CUB200
+    import shutil
+    import os
 
-    path = "larger_data/"
-    directories = os.listdir(path)
+    images = {}
+    with open("CUB_200_2011/images.txt", "r") as f:
+        for i in f.readlines():
+            index, im_path = i.split(" ")
+            images[index] = "CUB_200_2011/images/" + im_path.strip("\n")
 
-    image_paths = []
+    train_test = {}
+    with open("CUB_200_2011/train_test_split.txt", "r") as f:
+        for i in f.readlines():
+            index, train = i.split(" ")
+            train_test[images[index].strip("\n")] = train
+
+    image_paths = list(images.values())
+    train = []
+    val = []
+    for i in range(len(image_paths)):
+        if train_test[image_paths[i]].strip("\n") == "1":
+            train.append(i)
+        else:
+            val.append(i)
+
     categories = []
+    for im in image_paths:
+        categories.append(im.strip("CUB_200_2011/images/").split("/")[0])
 
-    # this checks for broken images by trying to open them first
-    for directory in tqdm(directories):
-        ims = os.listdir(path + directory)
-        for im in ims:
-            if im.split(".")[-1] in ["jpg", "png", "jpeg"]:
-                try:
-                    im2 = Image.open(path + directory + "/" + im)
-                    image_paths.append(path + directory + "/" + im)
-                    categories.append(directory)
-                except:
-                    os.remove(path + directory + "/" + im)
-
+    np.savez("CUB_indices.npz", train=train, val=val, holdout=[])
 
     # now make encoded labels
     le = LabelEncoder()
@@ -76,26 +87,27 @@ if __name__ == '__main__':
                               embedder_lr=3e-3,
                               classifier_lr=3e-3,
                               weight_decay=0.1,
-                              trunk_decay=0.95,
-                              embedder_decay=0.95,
-                              classifier_decay=0.95,
+                              trunk_decay=0.96,
+                              embedder_decay=0.96,
+                              classifier_decay=0.96,
                               log_train=True)
 
-    #model.load_weights("models/models.h5", load_classifier=True, load_optimizers=False)
+    model.load_weights("models.h5", load_classifier=False, load_optimizers=False)
     model.setup_data(dataset=NewData,
-                     batch_size=1024,
-                     load_indices=False,
-                     num_workers=8,
+                     batch_size=128,
+                     load_indices=True,
+                     num_workers=16,
                      M=4,
                      labels=labels,
-                     indices_path="logs/data_indices.npz",
-                     train_split=0.95)
+                     indices_path="CUB_indices.npz",
+                     train_split=0.90,
+                     max_batches=200)
 
     print(len(model.labels))
     print(len(np.unique(model.labels)))
     print(len(model.train_indices))
-    model.train(n_epochs=25,
-                loss_ratios=[10,5,0.2,5],
+    model.train(n_epochs=120,
+                loss_ratios=[1,10,0.5,5],
                 class_weighting=False,
                 epoch_train=False,
                 epoch_val=True)
@@ -108,7 +120,7 @@ if __name__ == '__main__':
 
     # finish experiment and zip up
     experiment_id = zip_files(["models", "logs"],
-                              experiment_id="b0_593_new")
+                              experiment_id="cub200_noweights")
     upload_to_s3(file_name=f"experiment_{experiment_id}.zip",
                  destination=None,
                  bucket="msc-thesis")

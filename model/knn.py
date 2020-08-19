@@ -151,7 +151,6 @@ class TorchKNN():
             return 25
 
 
-
 def torch_get_top_k(bins, k=3):
     """
     Useful for top k accuracy
@@ -162,7 +161,7 @@ def torch_get_top_k(bins, k=3):
     return torch.topk(bins, k=k).indices
 
 
-def knn_sim(embeddings, labels, k=3, distance_weighted=True, local_normalization=True, num_classes=None):
+def knn_sim(embeddings, labels, k=3, distance_weighted=False, local_normalization=False, num_classes=None):
     """
     Simulates kNN for every embedding. Basically operates under the principle
     that when we compute the pairwise distance we are computing the distance
@@ -197,11 +196,12 @@ def knn_sim(embeddings, labels, k=3, distance_weighted=True, local_normalization
     return x
 
 
-def get_weights(preds, labels):
+def get_weights(preds, labels, normalize=True):
     report = classification_report(preds.cpu().numpy(), labels.cpu().numpy(), output_dict=True)
     f1_scores = [report[key]["f1-score"] for key in list(report.keys())[:-3]]
     weights = torch.from_numpy(np.array(f1_scores) + 0.05).reciprocal()
-    weights /= torch.sum(weights)
+    if normalize:
+        weights /= torch.sum(weights)
     return weights.numpy(), np.array([int(i) for i in list(report.keys())[:-3]])
 
 

@@ -7,7 +7,8 @@ import psutil
 from io import BytesIO
 import copy
 
-class NewData(torch.utils.data.Dataset):
+
+class CIFAR100(torch.utils.data.Dataset):
     def __init__(self, h5_path=None, transform=None):
         """
         Inputs:
@@ -16,14 +17,14 @@ class NewData(torch.utils.data.Dataset):
                                           applies transforms
         """
         self.transform = transform
-        self.im_paths = copy.deepcopy(image_paths)
+        self.images = copy.deepcopy(images)
         self.labels = copy.deepcopy(labels)
 
     def __getitem__(self, index):
         """
         Method for pulling images and labels from the initialized HDF5 file
         """
-        X = Image.open(self.im_paths[index]).convert("RGB")
+        X = Image.fromarray(self.images[index])
         y = self.labels[index]
 
         if self.transform is not None:
@@ -34,35 +35,35 @@ class NewData(torch.utils.data.Dataset):
         return len(self.labels)
 
 
+def unpickle(file):
+    import pickle
+    with open(file, 'rb') as fo:
+        dict = pickle.load(fo, encoding='bytes')
+    return dict
+
+
 if __name__ == '__main__':
 
     # prepare the experiment
     prepare_experiment()
 
+    # CIFAR100
+    t = unpickle("train")
+    v = unpickle("test")
+    images = np.vstack([t[b"data"], v[b"data"]])
+    labels = np.hstack([t[b"fine_labels"], v[b"fine_labels"]])
+    images = images.reshape(-1, 3, 32, 32).transpose((0, 2, 3, 1))
 
-    path = "larger_data/"
-    directories = os.listdir(path)
-
-    image_paths = []
-    categories = []
-
-    # this checks for broken images by trying to open them first
-    for directory in tqdm(directories):
-        ims = os.listdir(path + directory)
-        for im in ims:
-            if im.split(".")[-1] in ["jpg", "png", "jpeg"]:
-                try:
-                    im2 = Image.open(path + directory + "/" + im)
-                    image_paths.append(path + directory + "/" + im)
-                    categories.append(directory)
-                except:
-                    os.remove(path + directory + "/" + im)
-
+    # save indices for training
+    np.savez("cifar_indices.npz",
+             train=np.arange(50_000),
+             val=np.arange(50_000, 60_000),
+             holdout=[])
 
     # now make encoded labels
     le = LabelEncoder()
     le.fit(categories)
-    labels = le.transform(categories)
+    labels = le.transform(labels)
 
     print(len(labels))
 
@@ -73,29 +74,27 @@ if __name__ == '__main__':
                               embedder_optim="adamW",
                               classifier_optim="adamW",
                               trunk_lr=1e-4,
-                              embedder_lr=3e-3,
-                              classifier_lr=3e-3,
-                              weight_decay=0.1,
-                              trunk_decay=0.95,
-                              embedder_decay=0.95,
-                              classifier_decay=0.95,
+                              embedder_lr=1e-3,
+                              classifier_lr=1e-3,
+                              trunk_decay=0.9,
+                              embedder_decay=0.9,
+                              classifier_decay=0.9,
                               log_train=True)
 
-    #model.load_weights("models/models.h5", load_classifier=True, load_optimizers=False)
-    model.setup_data(dataset=NewData,
-                     batch_size=1024,
-                     load_indices=False,
+    model.load_weights("final_b0.h5", load_classifier=True, load_optimizers=False)
+    model.setup_data(dataset=CIFAR100,
+                     batch_size=280,
+                     load_indices=True,
                      num_workers=8,
                      M=4,
                      labels=labels,
-                     indices_path="logs/data_indices.npz",
-                     train_split=0.95)
+                     indices_path="cifar_indices.npz")
 
     print(len(model.labels))
     print(len(np.unique(model.labels)))
     print(len(model.train_indices))
-    model.train(n_epochs=25,
-                loss_ratios=[10,5,0.2,5],
+    model.train(n_epochs=10,
+                loss_ratios=[1,5,1,5],
                 class_weighting=False,
                 epoch_train=False,
                 epoch_val=True)
@@ -108,7 +107,7 @@ if __name__ == '__main__':
 
     # finish experiment and zip up
     experiment_id = zip_files(["models", "logs"],
-                              experiment_id="b0_593_new")
+                              experiment_id="cifar_test")
     upload_to_s3(file_name=f"experiment_{experiment_id}.zip",
                  destination=None,
                  bucket="msc-thesis")

@@ -22,6 +22,7 @@ import functools
 
 # Import pytorch metric learning stuff
 from pytorch_metric_learning import losses, miners, samplers
+from pytorch_metric_learning.utils import common_functions
 
 # import pytorch stuff
 import torch
@@ -35,8 +36,6 @@ from torch.optim import Adam, RMSprop, AdamW, SGD
 from torchvision import datasets, transforms
 import torchvision.models as models
 import torchvision # to get access to the pretrained models
-from efficientnet_pytorch import EfficientNet
-
 # plotting libraries
 from tqdm.auto import tqdm
 from PIL import Image
@@ -61,22 +60,31 @@ from .losses import *
 from data.hdf5_loader import *
 from data.autoaugment import ImageNetPolicy
 from .knn import knn_sim, get_weights, impostor_weights
-
+from efficientnet import EfficientNet
 
 class Network(nn.Module):
 
-    def __init__(self, layer_sizes, neuron_fc=2048):
+    def __init__(self, layer_sizes, neuron_fc=2048, activate_last=False, num_layers=2):
         super().__init__()
-        self.classifier = nn.Sequential(
-            nn.ReLU(True),
-            nn.Linear(layer_sizes[0], neuron_fc),
-            nn.BatchNorm1d(neuron_fc, momentum=0.9),
-            nn.ReLU(True),
-            nn.Dropout(0.2),
-            nn.Linear(neuron_fc, layer_sizes[1]),
-            #nn.Linear(layer_sizes[0], layer_sizes[1]),
-        )
 
+        layers = []
+
+        if activate_last:
+            layers += [nn.ReLU(True)]
+
+        if num_layers == 1:
+            layers += [nn.Linear(layer_sizes[0], layer_sizes[1])]
+
+        elif num_layers == 2:
+            layers += [nn.Linear(layer_sizes[0], neuron_fc),
+                       nn.BatchNorm1d(neuron_fc, momentum=0.9),
+                       nn.ReLU(True),
+                       nn.Dropout(0.2),
+                       nn.Linear(neuron_fc, layer_sizes[1])]
+    
+        self.classifier = nn.Sequential(*layers)
+
+    @autocast()
     def forward(self, x):
         return self.classifier(x)
 
@@ -127,14 +135,15 @@ class ThreeStageNetwork():
         # build three stage network
         self.num_classes = num_classes
         self.embedding_size = embedding_size
-        self.MLP_neurons = 1024 # output size of neural network + size used inside embedder/classifier MLP
+        self.MLP_neurons = 2048 # output size of neural network + size used inside embedder/classifier MLP
 
         self.get_trunk(trunk_architecture)
-        #self.trunk._fc = torch.nn.Identity()
         self.trunk = nn.DataParallel(self.trunk.to(self.device))
-        self.embedder = nn.DataParallel(Network([self.MLP_neurons, self.embedding_size], self.MLP_neurons).to(self.device))
-        self.classifier = nn.DataParallel(Network([self.embedding_size, self.num_classes], self.MLP_neurons).to(self.device))
-
+        self.embedder = nn.DataParallel(Network(layer_sizes=[self.MLP_neurons, self.embedding_size], 
+                                                neuron_fc=self.MLP_neurons).to(self.device))
+        self.classifier = nn.DataParallel(Network(layer_sizes=[self.embedding_size, self.num_classes], 
+                                                  neuron_fc=self.MLP_neurons).to(self.device))
+        
         # build optimizers
         self.trunk_optimizer = self.get_optimizer(trunk_optim, 
                                                   self.trunk.parameters(), 
@@ -155,7 +164,7 @@ class ThreeStageNetwork():
         self.classifier_scheduler = ExponentialLR(self.classifier_optimizer,  gamma=classifier_decay)
 
         # build pair based losses and the miner
-        self.triplet = losses.TripletMarginLoss(margin=5).to(self.device)
+        self.triplet = losses.TripletMarginLoss(margin=0.2).to(self.device)
         self.multisimilarity = losses.MultiSimilarityLoss(alpha = 2, beta = 50, base = 1).to(self.device)
         self.miner = miners.MultiSimilarityMiner(epsilon=0.1)
         # build proxy anchor loss
@@ -209,8 +218,7 @@ class ThreeStageNetwork():
             self.trunk.classifier[1] = torch.nn.Linear(1280, self.MLP_neurons)
 
 
-
-    def get_embeddings_logits(self, dataset, indices, batch_size=128, num_workers=16):
+    def get_embeddings_logits(self, dataset, indices, batch_size=128, num_workers=16, return_collisions=False):
         """
         This can be used for inference but is not super appropriate since
         it requires the dataset/indices
@@ -227,11 +235,15 @@ class ThreeStageNetwork():
         tot_labels = []
         accuracies = []
 
+        if return_collisions:
+            # initialize weights to count # of collisions
+            class_weights = np.zeros(self.num_classes) + 0.2
+            label_count = torch.ones(self.num_classes).cuda()
+
         # turn all models into eval mode
         self.trunk.eval()
         self.embedder.eval()
-        if self.classifier_optimizer is not None:
-            self.classifier.eval()
+        self.classifier.eval()
 
         n_iter = int(temp_loader.sampler.__len__()/batch_size)
         # turn grad off for evaluation
@@ -245,6 +257,16 @@ class ThreeStageNetwork():
                     fc_out = self.trunk(im)
                     embeds = self.embedder(fc_out)
                     logits = self.classifier(embeds)
+
+                    if return_collisions:
+                        preds = knn_sim(embeds, labels, 
+                                        k=self.M,
+                                        distance_weighted=False,
+                                        local_normalization=False, 
+                                        num_classes=self.num_classes)
+                        weights = impostor_weights(preds, labels, k=self.M, num_classes=self.num_classes)
+                        class_weights += weights.cpu().numpy()
+                        label_count = label_count.scatter_add(0, labels, torch.ones(len(labels)).cuda())
 
                     # embeds -> to cpu and then to array
                     accuracies.append(calc_accuracy(logits, labels.to(self.device)))
@@ -264,7 +286,10 @@ class ThreeStageNetwork():
 
         del temp_loader, temp_sampler
 
-        return tot_embeds, tot_logits, tot_labels, np.mean(accuracies)
+        if return_collisions:
+            return  tot_embeds, tot_logits, tot_labels, np.mean(accuracies), class_weights/label_count.cpu().numpy()
+        else:
+            return tot_embeds, tot_logits, tot_labels, np.mean(accuracies)
 
 
     def save_all_logits_embeds(self, path):
@@ -319,7 +344,13 @@ class ThreeStageNetwork():
                 }, path + "/models.h5")
 
 
-    def load_weights(self, path, load_trunk=True, load_embedder=True, load_classifier=True, load_optimizers=True):
+    def load_weights(self, 
+                     path, 
+                     load_trunk=True, 
+                     load_embedder=True, 
+                     load_classifier=True, 
+                     partial_classifier=False, 
+                     load_optimizers=True):
         """
         This function is to continue training or to use a pretrained model,
         it will load a file saved from the save_model() method above at the
@@ -348,6 +379,15 @@ class ThreeStageNetwork():
             if load_optimizers:
               self.classifier_optimizer.load_state_dict(weights["classifier_optimizer_state_dict"])
             loaded.append("Classifier")
+
+        if partial_classifier:
+            print("Partial Loading of classifier")
+            # load overall network
+            self.classifier = nn.DataParallel(Network(layer_sizes=[self.embedding_size, 693], 
+                                                      neuron_fc=self.MLP_neurons).to(self.device))
+            self.classifier.load_state_dict(weights["classifier_state_dict"])
+            # replace last layer with number of classes
+            self.classifier.module.classifier[4] = nn.Linear(self.MLP_neurons, self.num_classes).to(self.device)
 
         print("Loaded pretrained weights for", path, "for", loaded)
 
@@ -413,6 +453,7 @@ class ThreeStageNetwork():
                    train_labels=None, 
                    load_indices=False, 
                    indices_path=None,
+                   max_batches=None,
                    log_save_path="logs"):
         """
         This method is meant to be used prior to training in order
@@ -450,7 +491,7 @@ class ThreeStageNetwork():
                 np.savez(log_save_path + "/data_indices.npz", train=train_indices, val=val_indices, holdout=holdout_indices)
 
         self.augmentations = data_augmentation(hflip=True,
-                                               crop=True,
+                                               crop=False,
                                                colorjitter=True,
                                                rotations=False,
                                                affine=False,
@@ -463,8 +504,10 @@ class ThreeStageNetwork():
                                                    augmentations=self.augmentations,
                                                    M=M,
                                                    labels=self.labels,
-                                                   train_indices=np.repeat(train_indices, repeat_indices))
+                                                   train_indices=np.repeat(train_indices, repeat_indices),
+                                                   max_batches=max_batches)
 
+        self.max_batches = max_batches
         self.dataset = dataset
         self.trainloader = trainloader
         self.val_dataset = val_dataset
@@ -489,7 +532,8 @@ class ThreeStageNetwork():
               epoch_save=False,
               save_trunk=True,
               save_embedder=True,
-              save_classifier=True):
+              save_classifier=True,
+              train_trunk=True):
         """
         This method is used for actually training the model, it is meant
         to be called after the setup_data() method and won't function
@@ -543,7 +587,10 @@ class ThreeStageNetwork():
         n_iters = np.int(self.trainloader.sampler.__len__() / self.batch_size)
         for epoch in range(n_epochs):
             # set our models to train mode
-            self.trunk.train()
+            if train_trunk:
+                self.trunk.train()
+            else:
+                self.trunk.eval()
             self.embedder.train()
             self.classifier.train()
 
@@ -565,9 +612,10 @@ class ThreeStageNetwork():
             # initialize class weights to be uniform distribution if no class_weighting
             if class_weighting:
                 # start in a smoothed fashion with 5 collisions each
-                class_weights = np.ones(self.num_classes) + 5
+                class_weights = np.zeros(self.num_classes) + 0.2
             else:
-                class_weights = np.ones(self.num_classes) / self.num_classes
+                class_weights = np.zeros(self.num_classes) + 0.2 #/ self.num_classes
+            label_count = torch.ones(self.num_classes).cuda()
 
             with tqdm(total=int(n_iters)) as t:
                 start_t = time()
@@ -576,13 +624,15 @@ class ThreeStageNetwork():
                     inputs, labels = inputs.to(self.device), labels.to(self.device)
 
                     # zero the parameter gradients
-                    self.trunk_optimizer.zero_grad()
+                    if train_trunk:
+                        self.trunk_optimizer.zero_grad()
+                        self.trunk.zero_grad()
+
                     self.embedder_optimizer.zero_grad()
-                    self.classifier_optimizer.zero_grad()
-                    self.proxy_optimizer.zero_grad()
-                    self.trunk.zero_grad()
                     self.embedder.zero_grad()
+                    self.classifier_optimizer.zero_grad()
                     self.classifier.zero_grad()
+                    self.proxy_optimizer.zero_grad()
 
                     # forward pass
                     with autocast():
@@ -628,30 +678,30 @@ class ThreeStageNetwork():
 
                     # now take a step
                     time_check = time()
-                    scaler.step(self.trunk_optimizer)
+                    if train_trunk:
+                        scaler.step(self.trunk_optimizer)
                     scaler.step(self.embedder_optimizer)
                     scaler.step(self.classifier_optimizer)
                     scaler.step(self.proxy_optimizer)
 
                     scaler.update()
 
-                    if class_weighting:
-                        # compute batch label weightings
-                        preds = knn_sim(embeddings, labels, 
-                                        k=self.M,
-                                        distance_weighted=False,
-                                        local_normalization=False, 
-                                        num_classes=self.num_classes)
-                        weights = impostor_weights(preds, labels, k=self.M, num_classes=self.num_classes)
-                        #weights, associated_labels = get_weights(preds, labels)
-                        # moving average weight calculation (x[l] = x[l] + (new_data - x[l])/(i+1))
-                        class_weights += (weights.cpu().numpy() - class_weights)/(i+1)
-                        #class_weights[associated_labels] += (weights - class_weights[associated_labels])/(i+1)
+                    #if class_weighting:
+                    # compute batch label weightings
+                    k = 1#self.M
+                    preds = knn_sim(embeddings, labels,
+                                    k=k,
+                                    distance_weighted=False,
+                                    local_normalization=False,
+                                    num_classes=self.num_classes)
+                    weights = impostor_weights(preds, labels, k=k, num_classes=self.num_classes)
+                    #weights, associated_labels = get_weights(preds, labels)
+                    # moving average weight calculation (x[l] = x[l] + (new_data - x[l])/(i+1))
+                    class_weights += weights.cpu().numpy()
+                    label_count = label_count.scatter_add(0, labels, torch.ones(len(labels)).cuda())
+                    #class_weights += (weights.cpu().numpy() - class_weights)/(i+1)
+                    #class_weights[associated_labels] += (weights - class_weights[associated_labels])/(i+1)
 
-                    # self.trunk_optimizer.step()
-                    # self.embedder_optimizer.step()
-                    # self.classifier_optimizer.step()
-                    # self.proxy_optimizer.step()
                     performance_dict["Optim_Step"] += time() - time_check
 
                     time_check = time()
@@ -695,8 +745,9 @@ class ThreeStageNetwork():
                     performance_dict["Logging"] += time() - time_check
 
             # save class weights after each epoch
-            if class_weighting:
-                np.save(f"logs/class_weights_{i}.npy", class_weights)
+            #if class_weighting:
+            class_weights /= label_count.cpu().numpy() # normalize by amount of times a certain label has occured
+            np.save(f"logs/class_weights_{epoch}.npy", class_weights)
 
             # build and save performance dictionary, keep in mind Load_Data is inaccurate due to prefetching
             performance_dict["Load_Data"] = np.sum(performance_dict[key] for key in performance_dict)
@@ -709,23 +760,28 @@ class ThreeStageNetwork():
                     json.dump(performance_dict, json_file)
             print(performance_dict)
 
-            # get the next dataloader based on class weights
-            trainloader, val_dataset = get_dataloaders(dataset=self.dataset,
-                                                       batch_size=self.batch_size,
-                                                       num_workers=self.num_workers,
-                                                       augmentations=self.augmentations,
-                                                       M=self.M,
-                                                       labels=self.labels,
-                                                       train_indices=np.repeat(self.train_indices, self.repeat_indices),
-                                                       class_weights=class_weights)
+            if class_weighting is True:
+                # get the next dataloader based on class weights
+                del self.trainloader
+                self.trainloader, self.val_dataset = get_dataloaders(dataset=self.dataset,
+                                                           batch_size=self.batch_size,
+                                                           num_workers=self.num_workers,
+                                                           augmentations=self.augmentations,
+                                                           M=self.M,
+                                                           labels=self.labels,
+                                                           train_indices=np.repeat(self.train_indices, self.repeat_indices),
+                                                           class_weights=class_weights,
+                                                           max_batches=self.max_batches)
 
             if epoch_train is True:
                 # Train accuracy, embeddings and potential UMAP
                 print("Training")
-                em, lo, la, train_accuracy = self.get_embeddings_logits(self.val_dataset,
-                                                                        self.train_indices,
-                                                                        self.batch_size*2,
-                                                                        self.num_workers)
+                em, lo, la, train_accuracy, collisions = self.get_embeddings_logits(self.val_dataset,
+                                                                                    self.train_indices,
+                                                                                    self.batch_size*2,
+                                                                                    self.num_workers,
+                                                                                    True)
+                np.save(f"logs/class_weights_{epoch}_val.npy", collision)
 
             if epoch_val is True:
                 # Validation accuracy, loss, embeddings and potential UMAP
@@ -766,7 +822,8 @@ class ThreeStageNetwork():
                                       datetime.now().strftime("%d/%m/%Y %H:%M:%S")])
 
             # check the learning rate schedulers
-            self.trunk_scheduler.step()
+            if train_trunk:
+                self.trunk_scheduler.step()
             self.embedder_scheduler.step()
             self.classifier_scheduler.step()
             self.proxy_scheduler.step()
